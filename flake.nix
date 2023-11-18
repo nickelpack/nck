@@ -36,7 +36,7 @@
 
         packages.default = outputs.nip.packages.release;
         devShells.default = outputs.nickelpack.devShell.overrideAttrs (old: {
-          packages = with pkgs; (old.packages or []) ++ [cargo-expand];
+          packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb];
         });
         formatter = pkgs.alejandra;
       };

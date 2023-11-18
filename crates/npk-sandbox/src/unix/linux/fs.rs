@@ -2,19 +2,18 @@ use std::{
     ffi::{OsStr, OsString},
     ops::Deref,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
+use anyhow::{Context, Result};
 use nix::{
+    errno::Errno,
     fcntl::OFlag,
     mount::{MntFlags, MsFlags},
     sys::stat::{makedev, Mode, SFlag},
     unistd::{Gid, Uid},
     NixPath,
 };
-
-use anyhow::{anyhow, Context, Result};
-use derive_more::Display;
 use once_cell::sync::Lazy;
 use procfs::process::{MountOptFields, Process};
 
@@ -96,37 +95,27 @@ impl From<DeviceType> for u64 {
     }
 }
 
-#[derive(Debug, Display)]
-#[display(fmt = "failed to open {:?} with flags {:x} and {:o}", _0, _1, _2)]
-pub struct OpenFailure(PathBuf, i32, u32);
-
 pub fn open(path: &Path, flags: OFlag, mode: Mode) -> Result<OwnedFd> {
     nix::fcntl::open(path, flags, mode)
         .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
-        .with_context(|| OpenFailure(path.to_path_buf(), flags.bits(), mode.bits()))
+        .with_context(|| format!("while opening {:?}", path))
 }
-
-#[derive(Debug, Display)]
-#[display(fmt = "failed to chown {:?} to {:?}:{:?}", _0, _1, _2)]
-pub struct ChownFailure(PathBuf, Option<Uid>, Option<Gid>);
 
 pub fn chown(path: &Path, uid: Option<Uid>, gid: Option<Gid>) -> Result<()> {
-    std::os::unix::fs::chown(path, uid.map(Uid::as_raw), gid.map(Gid::as_raw))
-        .with_context(|| ChownFailure(path.to_path_buf(), uid, gid))
+    std::os::unix::fs::chown(path, uid.map(Uid::as_raw), gid.map(Gid::as_raw)).with_context(|| {
+        format!(
+            "while changing the owner of {:?} to {}:{}",
+            path,
+            uid.map(|v| v.to_string()).unwrap_or("-".to_string()),
+            gid.map(|v| v.to_string()).unwrap_or("-".to_string())
+        )
+    })
 }
-
-#[derive(Debug, Display)]
-#[display(fmt = "failed to symlink {:?} to {:?}", _0, _1)]
-pub struct SymlinkFailure(PathBuf, PathBuf);
 
 pub fn symlink(src: &Path, dest: &Path) -> Result<()> {
     std::os::unix::fs::symlink(src, dest)
-        .with_context(|| SymlinkFailure(src.to_path_buf(), dest.to_path_buf()))
+        .with_context(|| format!("while symlinking {:?} to {:?}", src, dest))
 }
-
-#[derive(Debug, Display)]
-#[display(fmt = "failed to mount {:?}", _0)]
-pub struct MountFailure(PathBuf);
 
 pub fn mount<T, O>(
     src: Option<&Path>,
@@ -147,25 +136,37 @@ where
     }
 
     nix::mount::mount(src, dest, ty, flags, options)
-        .with_context(|| MountFailure(dest.to_path_buf()))
+        .with_context(|| format!("while mounting {:?}", dest))
 }
-
-#[derive(Debug, Display)]
-#[display(fmt = "failed to bind {:?} to {:?}", _0, _1)]
-pub struct BindFailure(PathBuf, PathBuf);
 
 pub fn bind(src: &Path, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| BindFailure(src.to_path_buf(), dest.to_path_buf()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "while creating the containing directory to bind {:?} from {:?}",
+                dest, src
+            )
+        })?;
     }
 
     if src.is_dir() {
         std::fs::create_dir(dest)
-            .with_context(|| BindFailure(src.to_path_buf(), dest.to_path_buf()))?;
+            .map_err(|e| Errno::from_i32(e.raw_os_error().unwrap_or_default()))
+            .with_context(|| {
+                format!(
+                    "while creating the target directory {:?} to bind from {:?}",
+                    dest, src
+                )
+            })?;
     } else {
         std::fs::write(dest, b"")
-            .with_context(|| BindFailure(src.to_path_buf(), dest.to_path_buf()))?;
+            .map_err(|e| Errno::from_i32(e.raw_os_error().unwrap_or_default()))
+            .with_context(|| {
+                format!(
+                    "while creating the target file {:?} to bind from {:?}",
+                    dest, src
+                )
+            })?;
     }
 
     mount(
@@ -175,71 +176,57 @@ pub fn bind(src: &Path, dest: &Path) -> Result<()> {
         MsFlags::MS_REC | MsFlags::MS_BIND,
         None::<&str>,
     )
-    .with_context(|| BindFailure(src.to_path_buf(), dest.to_path_buf()))
+    .with_context(|| format!("while creating a bind from {:?} to {:?}", src, dest))
 }
-
-#[derive(Debug, Display)]
-#[display(fmt = "failed to unmount {:?}", _0)]
-pub struct UMountFailure(PathBuf);
 
 pub fn umount(path: &Path, flags: MntFlags) -> Result<()> {
-    nix::mount::umount2(path, flags).with_context(|| UMountFailure(path.to_path_buf()))
+    nix::mount::umount2(path, flags).with_context(|| format!("while unmounting {:?}", path))
 }
 
-#[derive(Debug, Display)]
-#[display(fmt = "failed to chdir to fd {:x}", _0)]
-pub struct FChDirFailure(i32);
-
-pub fn fchdir(path: &impl AsRawFd) -> Result<()> {
-    let path = path.as_raw_fd();
-    nix::unistd::fchdir(path).with_context(|| FChDirFailure(path))
+pub fn fchdir(fd: &impl AsRawFd) -> Result<()> {
+    let path = fd.as_raw_fd();
+    nix::unistd::fchdir(path)
+        .with_context(|| format!("while changing directory to fd {:?}", fd.as_raw_fd()))
 }
-
-#[derive(Debug, Display)]
-#[display(fmt = "failed to chdir to {:?}", _0)]
-pub struct ChDirFailure(PathBuf);
 
 pub fn chdir(path: &Path) -> Result<()> {
-    nix::unistd::chdir(path).with_context(|| ChDirFailure(path.to_path_buf()))
+    nix::unistd::chdir(path).with_context(|| format!("while changing directory to {:?}", path))
 }
-
-#[derive(Debug, Display)]
-#[display(fmt = "failed to pivot to {:?} from {:?}", _0, _1)]
-pub struct PivotRootFailure(PathBuf, PathBuf);
 
 pub fn pivot_root(new_root: &Path, put_old: &Path) -> Result<()> {
-    nix::unistd::pivot_root(new_root, put_old)
-        .with_context(|| PivotRootFailure(new_root.to_path_buf(), put_old.to_path_buf()))
-}
-
-#[derive(Debug, Display)]
-pub enum MakeRootPrivateFailure {
-    #[display(fmt = "failed to make the process root private: could not list roots")]
-    ListRoots(PathBuf),
-    #[display(
-        fmt = "failed to make the process root private: could not find parent of {:?}",
-        _0
-    )]
-    FindParent(PathBuf),
-    #[display(fmt = "failed to make the process root private: could rebind {:?}", _0)]
-    Rebind(PathBuf),
+    nix::unistd::pivot_root(new_root, put_old).with_context(|| {
+        format!(
+            "while pivoting the root from {:?} to {:?}",
+            put_old, new_root
+        )
+    })
 }
 
 pub fn make_root_private(path: &Path) -> Result<()> {
-    use MakeRootPrivateFailure::*;
+    let myself = Process::myself()
+        .with_context(|| format!("while getting information about the current process into order to make the mount that contains {:?} private", path))?;
 
-    let myself = Process::myself().with_context(|| ListRoots(path.to_path_buf()))?;
-
-    let mountinfo = myself
-        .mountinfo()
-        .with_context(|| ListRoots(path.to_path_buf()))?;
+    let mountinfo = myself.mountinfo().with_context(|| {
+        format!(
+            "while listing the mounts for the current process in order to make the mount that contains {:?} private",
+            path
+        )
+    })?;
 
     let parent = mountinfo
         .into_iter()
         .filter(|mi| path.starts_with(&mi.mount_point))
         .max_by(|a, b| a.mount_point.len().cmp(&b.mount_point.len()))
-        .ok_or_else(|| anyhow!("no apparent parent mount"))
-        .with_context(|| FindParent(path.to_path_buf()))?;
+        .ok_or(anyhow::anyhow!(
+            "the mount that contains {:?} could not be determined",
+            path
+        ))
+        .with_context(|| {
+            format!(
+                "while finding the mount that contains {:?} in order to make it private",
+                path
+            )
+        })?;
 
     if parent
         .opt_fields
@@ -253,15 +240,11 @@ pub fn make_root_private(path: &Path) -> Result<()> {
             MsFlags::MS_PRIVATE | MsFlags::MS_REC,
             None::<&str>,
         )
-        .with_context(|| Rebind(parent.mount_point.clone()))?;
+        .with_context(|| format!("while making {:?} a private mount", parent.mount_point))?;
     }
 
     Ok(())
 }
-
-#[derive(Debug, Display)]
-#[display(fmt = "failed to chroot to {:?}", _0)]
-pub struct ChrootFailure(PathBuf);
 
 pub fn chroot(path: &Path) -> Result<()> {
     mount(
@@ -271,15 +254,20 @@ pub fn chroot(path: &Path) -> Result<()> {
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
     )
-    .with_context(|| ChrootFailure(path.to_path_buf()))?;
+    .with_context(|| format!("while binding {:?} to itself in order to pivot", path))?;
 
-    let newroot = open(path, OFlag::O_DIRECTORY | OFlag::O_RDONLY, Mode::empty())
-        .with_context(|| ChrootFailure(path.to_path_buf()))?;
+    let newroot =
+        open(path, OFlag::O_DIRECTORY | OFlag::O_RDONLY, Mode::empty()).with_context(|| {
+            format!(
+                "while opening the source directory {:?} in order to pivot to it",
+                path
+            )
+        })?;
 
     // pivot root usually changes the root directory to first argument, and then mounts the original root directory at
     // second argument. Giving same path for both stacks mapping of the original root directory above the new directory
     // at the same path, then the call to umount unmounts the original root directory from this path.
-    pivot_root(path, path).with_context(|| ChrootFailure(path.to_path_buf()))?;
+    pivot_root(path, path).with_context(|| format!("while pivoting to {:?}", path))?;
 
     mount(
         None,
@@ -288,26 +276,22 @@ pub fn chroot(path: &Path) -> Result<()> {
         MsFlags::MS_SLAVE | MsFlags::MS_REC,
         None::<&str>,
     )
-    .with_context(|| ChrootFailure(path.to_path_buf()))?;
+    .with_context(|| {
+        format!(
+            "while marking the new root as a slave in order to complete pivot to {:?}",
+            path
+        )
+    })?;
 
-    umount(Path::new("/"), MntFlags::MNT_DETACH)
-        .with_context(|| ChrootFailure(path.to_path_buf()))?;
+    umount(Path::new("/"), MntFlags::MNT_DETACH).with_context(|| {
+        format!(
+            "while unmounting the old root in order to complete the pivot to {:?}",
+            path
+        )
+    })?;
 
-    fchdir(&newroot).with_context(|| ChrootFailure(path.to_path_buf()))?;
+    fchdir(&newroot)
+        .with_context(|| format!("while switching to the newly pivoted root at {:?}", path))?;
 
     Ok(())
-}
-
-#[derive(Debug, Display)]
-#[display(fmt = "failed to chmod {:?} to {:o}", _0, _1)]
-pub struct ChmodFailure(PathBuf, u32);
-
-pub fn chmod(path: &Path, mode: Mode) -> Result<()> {
-    nix::sys::stat::fchmodat(
-        None,
-        path,
-        mode,
-        nix::sys::stat::FchmodatFlags::NoFollowSymlink,
-    )
-    .with_context(|| ChmodFailure(path.to_path_buf(), mode.bits()))
 }
