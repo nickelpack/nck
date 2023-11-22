@@ -43,8 +43,8 @@ pub fn set_keep_capabilities(keep: bool) -> Result<()> {
         })
 }
 
-pub fn clone(mut child_fun: impl FnMut() -> isize, flags: CloneFlags) -> Result<Pid> {
-    const STACK_SIZE: usize = 1 * 1024 * 1024;
+pub fn clone(child_fun: impl FnMut() -> isize, flags: CloneFlags) -> Result<Pid> {
+    const STACK_SIZE: usize = 1024 * 1024;
     let mut stack = [0u8; STACK_SIZE];
 
     let result = unsafe { nix::sched::clone(Box::new(child_fun), &mut stack, flags, None) }
@@ -54,6 +54,11 @@ pub fn clone(mut child_fun: impl FnMut() -> isize, flags: CloneFlags) -> Result<
 
 pub fn fork() -> Result<nix::unistd::ForkResult> {
     unsafe { nix::unistd::fork() }.with_context(|| "while forking the current process")
+}
+
+pub fn unshare(flags: CloneFlags) -> Result<()> {
+    nix::sched::unshare(flags).with_context(|| "while unsharing")?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,4 +161,40 @@ pub fn close_fds() -> Result<()> {
     .with_context(|| "while closing all file descriptor in the current process")?;
 
     Ok(())
+}
+
+pub struct ChildProcess(Option<Pid>);
+
+impl std::fmt::Debug for ChildProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(pid) = self.0 {
+            pid.fmt(f)
+        } else {
+            f.debug_struct("Pid").finish()
+        }
+    }
+}
+
+impl ChildProcess {
+    pub fn inner(&self) -> Pid {
+        self.0.unwrap()
+    }
+
+    pub fn into_inner(mut self) -> Option<Pid> {
+        self.0.take()
+    }
+}
+
+impl From<Pid> for ChildProcess {
+    fn from(value: Pid) -> Self {
+        Self(Some(value))
+    }
+}
+
+impl Drop for ChildProcess {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.take() {
+            kill_wait(pid).ok();
+        }
+    }
 }

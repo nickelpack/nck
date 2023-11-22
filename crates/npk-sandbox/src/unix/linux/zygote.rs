@@ -1,113 +1,165 @@
-use std::{path::PathBuf, sync::Arc};
+mod proto;
 
-use anyhow::{Context, Result};
-use async_lock::Mutex;
-use remoc::{codec::Bincode, prelude::*};
-use serde::{Deserialize, Serialize};
-use tokio::{
-    net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    task::JoinHandle,
+use std::{
+    io::Write,
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
 };
 
-use super::{Main, MainFns};
+use anyhow::{Context, Result};
+use nix::{
+    sched::CloneFlags,
+    unistd::{Gid, Uid},
+};
+use npk_util::io::{timeout, wait_for_file, Buffer, TempDir};
+pub use proto::*;
 
-#[derive(Debug)]
-struct StaticState {
-    socket_path: PathBuf,
-}
+use crate::unix::{linux::proc::ChildProcess, SOCKET_TIMEOUT, ZYGOTE_HEADER_SIZE};
 
-#[derive(Debug)]
-struct SharedState {}
+use super::Config;
 
-impl SharedState {
-    pub async fn spawn(&self, opts: SandboxOptions) -> Result<PathBuf, String> {
-        println!("{:?}", opts);
-        Ok(PathBuf::from("some result"))
+pub const SOCKET_NAME: &str = "zygote.socket";
+
+pub fn main(cfg: super::Config) -> Result<()> {
+    let uid = nix::unistd::getuid();
+    let gid = nix::unistd::getgid();
+
+    // Required to clone NEWPID.
+    // super::proc::unshare(CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS)
+    //     .with_context(|| "while initializing zygote")?;
+
+    let socket_path = cfg.working_dir.join(SOCKET_NAME);
+    timeout(SOCKET_TIMEOUT, || wait_for_file(socket_path.as_path()))
+        .with_context(|| "while waiting for the controller socket to appear on the filesystem")?;
+
+    tracing::info!("connecting to controller at {:?}", socket_path.as_path());
+
+    // TODO: This won't actually time out
+    let mut socket = timeout(SOCKET_TIMEOUT, || {
+        UnixStream::connect(socket_path.as_path())
+    })
+    .with_context(|| "while connecting to the controller socket")?;
+
+    tracing::info!("connected to controller");
+
+    // super::user::map_direct(uid, gid, false)?;
+
+    // super::user::set_id(uid, gid, Vec::default())
+    //     .with_context(|| "while updating the user and group ids")?;
+
+    let mut read_buffer = Buffer::with_capacity(ZYGOTE_HEADER_SIZE);
+    let mut write_buffer = Buffer::with_capacity(ZYGOTE_HEADER_SIZE);
+    let mut previous_pid = None::<ChildProcess>;
+    loop {
+        let request = read_from_socket(&mut read_buffer, &mut socket)?;
+
+        if let Some(pid) = previous_pid.take() {
+            // Closing the child is now the controller's problem.
+            pid.into_inner();
+        }
+
+        match request {
+            Request::Spawn(req) => {
+                tracing::debug!("received spawn request");
+
+                let (pid, working_path, socket_path, rootfs_path) =
+                    spawn_sandbox(cfg.clone(), req)?;
+
+                let response = SpawnResponse {
+                    pid: pid.inner().as_raw(),
+                    sandbox_path: working_path,
+                    socket_path,
+                    rootfs_path,
+                };
+
+                tracing::debug!("writing response to socket");
+                write_to_socket(&mut write_buffer, &mut socket, &response)?;
+
+                previous_pid = Some(pid);
+            }
+        }
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ZygoteFns {
-    pub spawn: rfn::RFn<(SandboxOptions,), std::result::Result<PathBuf, String>>,
-}
+fn spawn_sandbox(
+    cfg: Config,
+    req: SpawnRequest,
+) -> Result<(ChildProcess, PathBuf, PathBuf, PathBuf)> {
+    let sandbox_path = TempDir::new_in(cfg.working_dir.as_path())
+        .with_context(|| "while creating a temporary directory for the sandbox infrastructure")?
+        .forget();
+    let mut socket_path = sandbox_path.clone();
+    socket_path.set_extension("socket");
 
-#[derive(Debug)]
-pub struct Zygote {
-    state: Option<Arc<Mutex<StaticState>>>,
-    handle: JoinHandle<()>,
-}
+    let rootfs_path = sandbox_path.join("rootfs");
 
-impl Zygote {
-    pub(crate) async fn new(
-        socket_path: PathBuf,
-        rx: OwnedReadHalf,
-        tx: OwnedWriteHalf,
-    ) -> Result<Zygote> {
-        let (conn, mut tx, mut rx) =
-            remoc::Connect::io::<_, _, _, _, Bincode>(remoc::Cfg::balanced(), rx, tx)
-                .await
-                .with_context(|| "while establishing IPC with the parent")?;
-        let handle = tokio::spawn(async { conn.await.unwrap() });
+    let cloned_sandbox_path = sandbox_path.clone();
+    let cloned_socket_path = socket_path.clone();
+    let cloned_rootfs_path = rootfs_path.clone();
+    let cloned_req = req.clone();
+    let pid = super::proc::clone(
+        move || {
+            let cloned_sandbox_path = cloned_sandbox_path.clone();
+            let cloned_socket_path = cloned_socket_path.clone();
+            let cloned_rootfs_path = cloned_rootfs_path.clone();
+            let cloned_req = cloned_req.clone();
 
-        let state = StaticState { socket_path };
+            // super::proc::unshare(
+            //     CloneFlags::CLONE_NEWUSER
+            //         | CloneFlags::CLONE_NEWNS
+            //         | CloneFlags::CLONE_NEWCGROUP
+            //         | CloneFlags::CLONE_NEWUTS
+            //         | CloneFlags::CLONE_NEWIPC,
+            // )
+            // .with_context(|| "while unsharing sandbox")
+            // .unwrap();
 
-        let shared = Arc::new(Box::new(SharedState {}));
-        let next = shared.clone();
-        let mut spawn = |opts: SandboxOptions| async move {
-            println!("{:?}", opts);
-            Ok::<_, String>(PathBuf::from("some result"))
-        };
-        let spawn = rfn::RFn::new_1(spawn);
+            // This thread has novel safety requirements, so abandon it as quickly as possible.
+            let result = std::thread::spawn(move || {
+                super::proc::close_fds().unwrap();
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(super::child::main(
+                        cloned_req,
+                        cloned_sandbox_path,
+                        cloned_socket_path,
+                        cloned_rootfs_path,
+                    ))
+            })
+            .join();
 
-        let result = Zygote {
-            state: Some(Arc::new(Mutex::new(state))),
-            handle,
-        };
+            if let Err(e) = result {
+                std::panic::resume_unwind(e)
+            } else {
+                0
+            }
+        },
+        CloneFlags::CLONE_NEWPID
+            | CloneFlags::CLONE_NEWUSER
+            | CloneFlags::CLONE_NEWNS
+            | CloneFlags::CLONE_NEWUTS
+            | CloneFlags::CLONE_NEWCGROUP
+            | CloneFlags::CLONE_NEWIPC,
+    )
+    .inspect_err(|_| {
+        std::fs::remove_dir_all(sandbox_path.as_path()).ok();
+    })
+    .with_context(|| "while cloning the zygote into a sandbox process")?;
 
-        let fns = ZygoteFns { spawn };
+    tracing::trace!("created sandbox process from zygote {:?}", pid);
 
-        tracing::trace!("hello from zygote");
-        let main: MainFns = rx.recv().await.unwrap().unwrap();
-        tx.send(fns).await.unwrap();
+    let pid: ChildProcess = pid.into();
 
-        Ok(result)
-    }
+    // Required to clone NEWUSER.
+    super::user::Mappings::default()
+        .push_uid_range(0, 165537..=165538)?
+        .push_gid_range(0, 165537..=165538)?
+        .push_uid_range(1000, 165538..=166539)?
+        .push_gid_range(1000, 165538..=165539)?
+        .apply(Some(pid.inner()))
+        .with_context(|| "while mapping zygote subuids and subgids")?;
 
-    pub async fn join(self) {
-        self.handle.await.unwrap()
-    }
-}
-
-bitflags::bitflags! {
-    #[repr(transparent)]
-    #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-    pub struct SharingFlags: u8 {
-        const FILESYSTEM = 0b0000_0001;
-        const RESOURCES = 0b0000_0010;
-        const IPC = 0b0000_0100;
-        const NETWORKING = 0b0000_1000;
-        const PROCESSES = 0b0001_0000;
-        const USERS = 0b0010_0000;
-    }
-}
-
-bitflags::bitflags! {
-    #[repr(transparent)]
-    #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-    pub struct CopyFlags: u8 {
-        const FILE_DESCRIPTORS = 0b0000_0001;
-        const DEBUGGER = 0b0000_0010;
-        const SIGNALS = 0b0000_0100;
-    }
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct SandboxOptions {
-    root: Option<PathBuf>,
-    share: SharingFlags,
-    copy: CopyFlags,
-    hostname: Option<String>,
-    uid: Option<u32>,
-    gid: Option<u32>,
-    suppl: Vec<u32>,
+    Ok((pid, sandbox_path, socket_path, rootfs_path))
 }

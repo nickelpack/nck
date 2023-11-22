@@ -9,7 +9,6 @@ rand = "0.8"
 tracing = "0.1"
 tracing-core = "0.1"
 tokio = "1"
-tokio-util = "0.7"
 futures = "0.3"
 tracing-subscriber = "0.3"
 serde = "1"
@@ -19,3 +18,4 @@ parking_lot = "0.12"
 bitflags = "2"
 
 npk-sandbox = { path = "./crates/npk-sandbox" }
+npk-util = { path = "./crates/npk-util" }

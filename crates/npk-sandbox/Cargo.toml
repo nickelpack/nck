@@ -6,6 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+npk-util.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 rand.workspace = true
@@ -17,13 +18,12 @@ once_cell.workspace = true
 parking_lot.workspace = true
 serde = { workspace = true, features = [ "derive"] }
 bitflags = { workspace = true, features = [ "serde" ] }
-bitcode = "*"
-crc = "*"
 
 async-lock = "3"
 flume = "0.11"
-tempfile = "3"
-remoc = { version = "0.11", default-features = false, features = [ "rch", "rfn", "serde", "default-codec-bincode" ] }
+remoc = { version = "0.11", default-features = false, features = [ "rtc", "serde", "default-codec-bincode" ]}
+bincode = "1"
+crc = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = "0.16"

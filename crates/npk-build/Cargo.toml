@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 npk-sandbox.workspace = true
+anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio = { workspace = true, features = [ "net", "rt", "rt-multi-thread", "time", "macros", "io-util" ] }

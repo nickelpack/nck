@@ -11,7 +11,6 @@ use nix::{
     fcntl::OFlag,
     mount::{MntFlags, MsFlags},
     sys::stat::{makedev, Mode, SFlag},
-    unistd::{Gid, Uid},
     NixPath,
 };
 use once_cell::sync::Lazy;
@@ -29,11 +28,11 @@ macro_rules! make_os_str {
     };
 }
 
-const BIND: Lazy<&'static OsStr> = make_os_str!("bind");
-const PROC: Lazy<&'static OsStr> = make_os_str!("proc");
-const SYSFS: Lazy<&'static OsStr> = make_os_str!("sysfs");
-const TMPFS: Lazy<&'static OsStr> = make_os_str!("tmpfs");
-const DEVPTS: Lazy<&'static OsStr> = make_os_str!("devpts");
+static BIND: Lazy<&'static OsStr> = make_os_str!("bind");
+static PROC: Lazy<&'static OsStr> = make_os_str!("proc");
+static SYSFS: Lazy<&'static OsStr> = make_os_str!("sysfs");
+static TMPFS: Lazy<&'static OsStr> = make_os_str!("tmpfs");
+static DEVPTS: Lazy<&'static OsStr> = make_os_str!("devpts");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountType {
@@ -101,25 +100,9 @@ pub fn open(path: &Path, flags: OFlag, mode: Mode) -> Result<OwnedFd> {
         .with_context(|| format!("while opening {:?}", path))
 }
 
-pub fn chown(path: &Path, uid: Option<Uid>, gid: Option<Gid>) -> Result<()> {
-    std::os::unix::fs::chown(path, uid.map(Uid::as_raw), gid.map(Gid::as_raw)).with_context(|| {
-        format!(
-            "while changing the owner of {:?} to {}:{}",
-            path,
-            uid.map(|v| v.to_string()).unwrap_or("-".to_string()),
-            gid.map(|v| v.to_string()).unwrap_or("-".to_string())
-        )
-    })
-}
-
-pub fn symlink(src: &Path, dest: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(src, dest)
-        .with_context(|| format!("while symlinking {:?} to {:?}", src, dest))
-}
-
-pub fn mount<T, O>(
-    src: Option<&Path>,
-    dest: &Path,
+pub fn mount<S: AsRef<Path>, D: AsRef<Path>, T, O>(
+    src: Option<S>,
+    dest: D,
     ty: Option<T>,
     mut flags: MsFlags,
     options: Option<O>,
@@ -128,6 +111,8 @@ where
     T: AsRef<OsStr>,
     O: AsRef<OsStr>,
 {
+    let src = src.as_ref().map(AsRef::as_ref);
+    let dest = dest.as_ref();
     let ty = ty.as_ref().map(AsRef::as_ref);
     let options = options.as_ref().map(AsRef::as_ref);
 
@@ -139,7 +124,10 @@ where
         .with_context(|| format!("while mounting {:?}", dest))
 }
 
-pub fn bind(src: &Path, dest: &Path) -> Result<()> {
+pub fn bind(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<()> {
+    let src = src.as_ref();
+    let dest = dest.as_ref();
+
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -150,14 +138,16 @@ pub fn bind(src: &Path, dest: &Path) -> Result<()> {
     }
 
     if src.is_dir() {
-        std::fs::create_dir(dest)
-            .map_err(|e| Errno::from_i32(e.raw_os_error().unwrap_or_default()))
-            .with_context(|| {
-                format!(
-                    "while creating the target directory {:?} to bind from {:?}",
-                    dest, src
-                )
-            })?;
+        if !dest.is_dir() {
+            std::fs::create_dir(dest)
+                .map_err(|e| Errno::from_i32(e.raw_os_error().unwrap_or_default()))
+                .with_context(|| {
+                    format!(
+                        "while creating the target directory {:?} to bind from {:?}",
+                        dest, src
+                    )
+                })?;
+        }
     } else {
         std::fs::write(dest, b"")
             .map_err(|e| Errno::from_i32(e.raw_os_error().unwrap_or_default()))
@@ -234,7 +224,7 @@ pub fn make_root_private(path: &Path) -> Result<()> {
         .any(|field| matches!(field, MountOptFields::Shared(_)))
     {
         mount(
-            None,
+            None::<&str>,
             &parent.mount_point,
             None::<&str>,
             MsFlags::MS_PRIVATE | MsFlags::MS_REC,
@@ -270,8 +260,8 @@ pub fn chroot(path: &Path) -> Result<()> {
     pivot_root(path, path).with_context(|| format!("while pivoting to {:?}", path))?;
 
     mount(
-        None,
-        Path::new("/"),
+        None::<&str>,
+        "/",
         None::<&str>,
         MsFlags::MS_SLAVE | MsFlags::MS_REC,
         None::<&str>,

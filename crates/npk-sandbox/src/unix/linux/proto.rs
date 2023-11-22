@@ -1,18 +1,16 @@
-use bitcode::{Decode, Encode};
-use crc::Crc;
+use remoc::prelude::*;
 
-const CRC: Crc<u64> = Crc::<u64>::new(&crc::CRC_64_REDIS);
+use thiserror::Error;
 
-pub fn crc(buf: impl AsRef<[u8]>) -> u64 {
-    CRC.checksum(buf.as_ref())
+#[derive(Error, Debug)]
+pub enum SandboxError {
+    #[error("an RPC error occurred {:?}", _0)]
+    RpcError(#[from] rtc::CallError),
+    #[error("an I/O error occurred {:?}", _0)]
+    IoError(#[from] std::io::Error),
 }
 
-#[derive(Debug, Encode, Decode)]
-pub enum ParentMessage {
-    Hello,
-}
-
-#[derive(Debug, Encode, Decode)]
-pub enum ChildMessage {
-    Hello,
+pub trait SandboxProcess {
+    fn isolate_network() -> Result<(), SandboxError>;
+    fn isolate_filesystem() -> Result<(), SandboxError>;
 }
