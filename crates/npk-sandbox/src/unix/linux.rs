@@ -27,31 +27,35 @@ pub struct Config {
     pub mappings: Mappings,
 }
 
-pub fn main<F, R>(cfg: Config, default_result: R, f: impl FnOnce(controller::Controller) -> F) -> R
+pub fn main<F, R>(cfg: Config, f: impl FnOnce(controller::Controller) -> F) -> Option<R>
 where
     F: std::future::Future<Output = R>,
 {
     #[tracing::instrument(name = "linux_main", level = "trace", skip_all, err(Debug))]
     pub fn imp<FF, RR>(
         cfg: Config,
-        default_result: RR,
         f: impl FnOnce(controller::Controller) -> FF,
-    ) -> nix::Result<RR>
+    ) -> nix::Result<Option<RR>>
     where
         FF: std::future::Future<Output = RR>,
     {
+        tracing::trace!(working_dir = ?cfg.working_dir, "creating working directory");
         std::fs::create_dir_all(cfg.working_dir.as_path()).map_err(std_error_to_nix)?;
 
+        tracing::trace!("ensuring that child processes retain capabilities");
         prctl::set_keep_capabilities(true).map_err(nix::Error::from_i32)?;
 
+        tracing::trace!("forking to controller and zygote");
         match unsafe { fork() }? {
-            nix::unistd::ForkResult::Parent { child } => controller::main(cfg, child.into(), f),
+            nix::unistd::ForkResult::Parent { child } => {
+                controller::main(cfg, child.into(), f).map(Some)
+            }
             nix::unistd::ForkResult::Child => {
                 zygote::main(cfg)?;
-                Ok(default_result)
+                Ok(None)
             }
         }
     }
 
-    imp(cfg, default_result, f).unwrap()
+    imp(cfg, f).unwrap()
 }

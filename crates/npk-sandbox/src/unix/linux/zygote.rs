@@ -14,10 +14,15 @@ pub const SOCKET_NAME: &str = "zygote.socket";
 
 #[tracing::instrument(name = "zygote_main", level = "trace", skip_all, err(Debug))]
 pub fn main(cfg: super::Config) -> nix::Result<()> {
+    if let Err(error) = prctl::set_name("npk-zygote") {
+        let error = nix::Error::from_i32(error);
+        tracing::warn!(?error, "failed to set zygote process name");
+    }
+
     let socket_path = cfg.working_dir.join(SOCKET_NAME);
     tracing::trace!(
         ?socket_path,
-        "waiting for controller socket to appear on the filesystem"
+        "waiting for the controller socket to appear on the filesystem"
     );
 
     timeout(SOCKET_TIMEOUT, || wait_for_file(socket_path.as_path()))

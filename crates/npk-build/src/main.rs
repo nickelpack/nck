@@ -24,22 +24,23 @@ fn main() -> ExitCode {
         .unwrap()
         .push_gid_range(1000, 165538..=165539)
         .unwrap();
-    if let Err(err) = npk_sandbox::current::flavor::main(
+    let result = npk_sandbox::current::flavor::main(
         Config {
-            working_dir: PathBuf::from("/tmp/npk4"),
+            working_dir: PathBuf::from("/tmp/npk"),
             mappings,
         },
-        Ok(()),
-        async move |mut c| controller_main(&mut c).await,
-    ) {
-        eprintln!("failed: {:?}", err);
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
+        controller_main,
+    );
+    match result {
+        Some(Err(error)) => {
+            tracing::error!(?error, "controller failed");
+            ExitCode::FAILURE
+        }
+        _ => ExitCode::SUCCESS,
     }
 }
 
-async fn controller_main(c: &mut Controller) -> anyhow::Result<()> {
+async fn controller_main(mut c: Controller) -> anyhow::Result<()> {
     c.spawn_sandbox().await?;
 
     Ok(())

@@ -28,14 +28,19 @@ pub async fn main(
 ) -> isize {
     #[tracing::instrument(name = "child_main", level = "trace", skip_all, fields(?sandbox_path), err(Debug))]
     async fn imp(
-        _req: SpawnRequest,
+        req: SpawnRequest,
         sandbox_path: PathBuf,
         socket_path: PathBuf,
         rootfs_path: PathBuf,
     ) -> nix::Result<()> {
+        if let Err(error) = prctl::set_name(&req.name) {
+            let error = nix::Error::from_i32(error);
+            tracing::warn!(?error, "failed to set zygote process name");
+        }
+
         tracing::trace!(
             ?socket_path,
-            "waiting for controller socket to appear on the filesystem"
+            "waiting for the controller socket to appear on the filesystem"
         );
 
         wait_for_file_async(socket_path.as_path())

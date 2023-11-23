@@ -21,6 +21,7 @@ impl From<SpawnRequest> for Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnRequest {
+    pub name: String,
     pub root_uid: u32,
     pub root_gid: u32,
     pub user_uid: u32,

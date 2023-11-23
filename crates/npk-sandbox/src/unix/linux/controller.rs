@@ -39,6 +39,17 @@ where
 {
     let zygote = {
         let socket_path = cfg.working_dir.join(super::zygote::SOCKET_NAME);
+        if socket_path.exists() {
+            tracing::debug!(?socket_path, "deleting existing socket");
+            if let Err(error) = std::fs::remove_file(socket_path.as_path()) {
+                tracing::warn!(
+                    ?error,
+                    ?socket_path,
+                    "failed to delete existing socket, attempting to listen anyway"
+                )
+            }
+        }
+
         let listener =
             UnixListener::bind(socket_path.as_path()).map_err(super::std_error_to_nix)?;
 
@@ -76,6 +87,7 @@ impl Controller {
             &mut self.write_buffer,
             &mut self.zygote,
             &Request::Spawn(SpawnRequest {
+                name: "npk-sandbox-01".to_string(),
                 root_uid: 0,
                 root_gid: 0,
                 user_uid: 0,
