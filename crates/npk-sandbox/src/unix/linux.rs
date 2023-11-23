@@ -6,12 +6,20 @@ pub mod proto;
 mod user;
 mod zygote;
 
-use std::{path::PathBuf, process::ExitCode};
-
-use anyhow::{Context, Result};
+use std::path::PathBuf;
 
 pub use controller::*;
+use nix::unistd::fork;
 pub use user::Mappings;
+
+const NIX_NONE: Option<&[u8]> = None::<&[u8]>;
+
+pub fn std_error_to_nix(error: std::io::Error) -> nix::Error {
+    nix::Error::from_i32(error.raw_os_error().unwrap_or_else(|| {
+        tracing::error!(?error, "unknown IO error");
+        0
+    }))
+}
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -19,34 +27,31 @@ pub struct Config {
     pub mappings: Mappings,
 }
 
-fn errno_to_stdio_err(err: nix::errno::Errno) -> std::io::Error {
-    std::io::Error::from_raw_os_error(err as i32)
-}
-
-pub fn main<F>(cfg: Config, f: impl FnOnce(controller::Controller) -> F) -> ExitCode
+pub fn main<F, R>(cfg: Config, default_result: R, f: impl FnOnce(controller::Controller) -> F) -> R
 where
-    F: std::future::Future<Output = Result<()>>,
+    F: std::future::Future<Output = R>,
 {
-    pub fn imp<FF>(cfg: Config, f: impl FnOnce(controller::Controller) -> FF) -> Result<()>
+    #[tracing::instrument(name = "linux_main", level = "trace", skip_all, err(Debug))]
+    pub fn imp<FF, RR>(
+        cfg: Config,
+        default_result: RR,
+        f: impl FnOnce(controller::Controller) -> FF,
+    ) -> nix::Result<RR>
     where
-        FF: std::future::Future<Output = Result<()>>,
+        FF: std::future::Future<Output = RR>,
     {
-        std::fs::create_dir_all(cfg.working_dir.as_path()).with_context(|| {
-            format!("while creating the working directory {:?}", cfg.working_dir)
-        })?;
+        std::fs::create_dir_all(cfg.working_dir.as_path()).map_err(std_error_to_nix)?;
 
-        proc::set_keep_capabilities(true).with_context(|| "while retaining capabilities")?;
+        prctl::set_keep_capabilities(true).map_err(nix::Error::from_i32)?;
 
-        match proc::fork().with_context(|| "while forking zygote")? {
+        match unsafe { fork() }? {
             nix::unistd::ForkResult::Parent { child } => controller::main(cfg, child.into(), f),
-            nix::unistd::ForkResult::Child => zygote::main(cfg),
+            nix::unistd::ForkResult::Child => {
+                zygote::main(cfg)?;
+                Ok(default_result)
+            }
         }
     }
 
-    if let Err(e) = imp(cfg, f) {
-        eprintln!("failed: {:?}", e);
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
-    }
+    imp(cfg, default_result, f).unwrap()
 }

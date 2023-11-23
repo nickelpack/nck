@@ -1,9 +1,7 @@
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
 use nix::{
     errno::Errno,
-    sched::CloneFlags,
     sys::{
         personality::{self, Persona},
         signal::Signal,
@@ -11,53 +9,13 @@ use nix::{
     unistd::Pid,
 };
 
-pub fn set_hostname(hostname: &str) -> Result<()> {
-    nix::unistd::sethostname(hostname)
-        .with_context(|| format!("while setting the hostname to {}", hostname))
-}
-
-pub fn get_personality() -> Result<Persona> {
-    personality::get().with_context(|| "while getting the current personality")
-}
-
-pub fn set_personality(persona: Persona) -> Result<Persona> {
-    personality::set(persona)
-        .with_context(|| format!("while setting the personality to {:x}", persona.bits()))
-}
-
-pub fn disable_aslr() -> Result<()> {
-    let mut persona = get_personality().with_context(|| "while disabling ASLR")?;
-    persona |= Persona::ADDR_NO_RANDOMIZE;
-    set_personality(persona).with_context(|| "while disabling ASLR")?;
-    Ok(())
-}
-
-pub fn set_keep_capabilities(keep: bool) -> Result<()> {
-    prctl::set_keep_capabilities(keep)
-        .map_err(nix::errno::from_i32)
-        .with_context(|| {
-            format!(
-                "while {} keep capabilities",
-                if keep { "enabling" } else { "disabling" }
-            )
-        })
-}
-
-pub fn clone(child_fun: impl FnMut() -> isize, flags: CloneFlags) -> Result<Pid> {
-    const STACK_SIZE: usize = 1024 * 1024;
-    let mut stack = [0u8; STACK_SIZE];
-
-    let result = unsafe { nix::sched::clone(Box::new(child_fun), &mut stack, flags, None) }
-        .with_context(|| format!("while cloning the current process with {:x}", flags.bits()))?;
-    Ok(result)
-}
-
-pub fn fork() -> Result<nix::unistd::ForkResult> {
-    unsafe { nix::unistd::fork() }.with_context(|| "while forking the current process")
-}
-
-pub fn unshare(flags: CloneFlags) -> Result<()> {
-    nix::sched::unshare(flags).with_context(|| "while unsharing")?;
+#[tracing::instrument(level = "trace", skip_all, err(Debug))]
+pub fn change_personality(f: impl FnOnce(Persona) -> Persona) -> nix::Result<()> {
+    let mut persona = personality::get()?;
+    tracing::trace!(?persona, "got existing persona");
+    persona = f(persona);
+    tracing::trace!(?persona, "setting persona");
+    personality::set(persona)?;
     Ok(())
 }
 
@@ -73,45 +31,33 @@ impl ProcessState {
     }
 }
 
-pub fn kill(pid: Pid, signal: Signal) -> Result<ProcessState> {
+#[tracing::instrument(level = "trace", fields(?pid, ?signal), err(Debug))]
+pub fn kill(pid: Pid, signal: Signal) -> nix::Result<ProcessState> {
     match nix::sys::signal::kill(pid, signal) {
         Ok(_) => poll(pid),
         Err(Errno::ESRCH) => Ok(ProcessState::Stopped),
-        Err(e) => Err(e.into()),
-    }
-    .with_context(|| format!("while sending {} to process {}", signal, pid))
-}
-
-pub fn poll(pid: Pid) -> Result<ProcessState> {
-    let result = match procfs::process::Process::new(pid.as_raw()) {
-        Ok(d) => Ok(d),
-        Err(e) => match e {
-            procfs::ProcError::PermissionDenied(_) => Err(Errno::EPERM),
-            procfs::ProcError::NotFound(_) => return Ok(ProcessState::Stopped),
-            procfs::ProcError::Incomplete(_) => Err(Errno::EBADF),
-            procfs::ProcError::Io(e, _) => {
-                Err(Errno::from_i32(e.raw_os_error().unwrap_or_default()))
-            }
-            _ => Err(Errno::UnknownErrno),
-        },
-    }
-    .with_context(|| format!("while polling the state of process {}", pid))?;
-    if result.is_alive() {
-        Ok(ProcessState::Running)
-    } else {
-        Ok(ProcessState::Stopped)
+        Err(e) => Err(e),
     }
 }
 
-pub fn kill_wait(pid: Pid) -> Result<()> {
-    if kill(pid, Signal::SIGTERM)
-        .with_context(|| format!("while gracefully killing {}", pid))?
-        .is_stopped()
-    {
+#[tracing::instrument(level = "trace", fields(?pid), err(Debug))]
+pub fn poll(pid: Pid) -> nix::Result<ProcessState> {
+    let result = procfs::process::Process::new(pid.as_raw()).map_err(map_proc_err);
+    match result {
+        Ok(v) if v.is_alive() => Ok(ProcessState::Running),
+        Ok(_) => Ok(ProcessState::Stopped),
+        Err(nix::Error::ENOENT) => Ok(ProcessState::Stopped),
+        Err(e) => Err(e),
+    }
+}
+
+#[tracing::instrument(level = "trace", fields(?pid), err(Debug))]
+pub fn kill_wait(pid: Pid) -> nix::Result<()> {
+    if kill(pid, Signal::SIGTERM)?.is_stopped() {
         return Ok(());
     }
 
-    tracing::info!("waiting for process {:?} to exit", pid);
+    tracing::trace!("waiting for process to exit");
     let end = Instant::now() + Duration::from_secs(2);
     while Instant::now() < end {
         std::thread::sleep(Duration::from_millis(25));
@@ -120,19 +66,12 @@ pub fn kill_wait(pid: Pid) -> Result<()> {
         }
     }
 
-    tracing::warn!(
-        "process {:?} has taken too long to exit, sending SIGKILL",
-        pid
-    );
-
-    if kill(pid, Signal::SIGKILL)
-        .with_context(|| format!("while gracefully killing {}", pid))?
-        .is_stopped()
-    {
+    tracing::warn!("process has taken too long to exit, sending SIGKILL",);
+    if kill(pid, Signal::SIGKILL)?.is_stopped() {
         return Ok(());
     }
 
-    tracing::info!("waiting for process {:?} to exit", pid);
+    tracing::trace!("waiting for process to exit");
     let end = Instant::now() + Duration::from_secs(1);
     while Instant::now() < end {
         std::thread::sleep(Duration::from_millis(25));
@@ -141,26 +80,25 @@ pub fn kill_wait(pid: Pid) -> Result<()> {
         }
     }
 
-    Err(anyhow::anyhow!("process {} has leaked", pid))
+    tracing::error!("process has leaked");
+    Err(nix::Error::UnknownErrno)
 }
 
-pub fn close_fds() -> Result<()> {
+#[tracing::instrument(level = "trace", err(Debug))]
+pub fn close_range(min: i32, max: Option<i32>) -> nix::Result<()> {
     use nix::libc;
     match unsafe {
         libc::syscall(
             libc::SYS_close_range,
-            3,
-            libc::c_int::MAX,
+            min,
+            max.unwrap_or(libc::c_int::MAX),
             libc::CLOSE_RANGE_CLOEXEC,
         )
     } {
         0 => Ok(()),
-        -1 => Err(nix::errno::Errno::last()),
-        _ => Err(nix::errno::Errno::UnknownErrno),
+        -1 => Err(nix::Error::last()),
+        _ => Err(nix::Error::UnknownErrno),
     }
-    .with_context(|| "while closing all file descriptor in the current process")?;
-
-    Ok(())
 }
 
 pub struct ChildProcess(Option<Pid>);
@@ -191,10 +129,33 @@ impl From<Pid> for ChildProcess {
     }
 }
 
+impl From<ChildProcess> for Pid {
+    fn from(value: ChildProcess) -> Self {
+        value.inner()
+    }
+}
+
 impl Drop for ChildProcess {
     fn drop(&mut self) {
         if let Some(pid) = self.0.take() {
             kill_wait(pid).ok();
+        }
+    }
+}
+
+pub fn map_proc_err(e: procfs::ProcError) -> nix::Error {
+    match e {
+        procfs::ProcError::PermissionDenied(_) => nix::Error::EPERM,
+        procfs::ProcError::NotFound(_) => nix::Error::ENOENT,
+        procfs::ProcError::Incomplete(_) => nix::Error::EBADF,
+        procfs::ProcError::Io(e, _) => nix::Error::from_i32(e.raw_os_error().unwrap_or_default()),
+        procfs::ProcError::InternalError(procfs_error) => {
+            tracing::error!(?procfs_error, "an internal procfs error occurred, please report it at https://github.com/eminence/procfs");
+            nix::Error::UnknownErrno
+        }
+        procfs::ProcError::Other(other_error) => {
+            tracing::error!(other_error, "an unspecified error occurred in procfs");
+            nix::Error::UnknownErrno
         }
     }
 }

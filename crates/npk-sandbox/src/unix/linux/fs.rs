@@ -1,38 +1,25 @@
 use std::{
-    ffi::{OsStr, OsString},
-    ops::Deref,
+    ffi::CStr,
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
 };
 
-use anyhow::{Context, Result};
 use nix::{
-    errno::Errno,
-    fcntl::OFlag,
-    mount::{MntFlags, MsFlags},
+    fcntl::{open, OFlag},
+    mount::{mount, umount2, MntFlags, MsFlags},
     sys::stat::{makedev, Mode, SFlag},
+    unistd::fchdir,
     NixPath,
 };
-use once_cell::sync::Lazy;
 use procfs::process::{MountOptFields, Process};
 
-macro_rules! make_os_str {
-    ($val: expr) => {
-        Lazy::new(move || {
-            static VAL: &'static str = $val;
-            let val = Box::new(OsString::from(VAL));
-            let val = Box::leak(val);
-            let os: &'static OsStr = val.as_os_str();
-            os
-        })
-    };
-}
+use super::NIX_NONE;
 
-static BIND: Lazy<&'static OsStr> = make_os_str!("bind");
-static PROC: Lazy<&'static OsStr> = make_os_str!("proc");
-static SYSFS: Lazy<&'static OsStr> = make_os_str!("sysfs");
-static TMPFS: Lazy<&'static OsStr> = make_os_str!("tmpfs");
-static DEVPTS: Lazy<&'static OsStr> = make_os_str!("devpts");
+const BIND: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"bind\0") };
+const PROC: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"proc\0") };
+const SYSFS: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"sysfs\0") };
+const TMPFS: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"tmpfs\0") };
+const DEVPTS: &CStr = unsafe { CStr::from_bytes_with_nul_unchecked(b"devpts\0") };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountType {
@@ -43,15 +30,32 @@ pub enum MountType {
     DevPts,
 }
 
-impl AsRef<OsStr> for MountType {
-    fn as_ref(&self) -> &OsStr {
-        match self {
-            MountType::Bind => BIND.deref(),
-            MountType::Proc => PROC.deref(),
-            MountType::SysFs => SYSFS.deref(),
-            MountType::TmpFs => TMPFS.deref(),
-            MountType::DevPts => DEVPTS.deref(),
+impl From<&MountType> for &CStr {
+    fn from(value: &MountType) -> Self {
+        match value {
+            MountType::Bind => BIND,
+            MountType::Proc => PROC,
+            MountType::SysFs => SYSFS,
+            MountType::TmpFs => TMPFS,
+            MountType::DevPts => DEVPTS,
         }
+    }
+}
+
+impl NixPath for MountType {
+    fn is_empty(&self) -> bool {
+        false
+    }
+
+    fn len(&self) -> usize {
+        std::convert::Into::<&CStr>::into(self).len()
+    }
+
+    fn with_nix_path<T, F>(&self, f: F) -> nix::Result<T>
+    where
+        F: FnOnce(&std::ffi::CStr) -> T,
+    {
+        std::convert::Into::<&CStr>::into(self).with_nix_path(f)
     }
 }
 
@@ -94,194 +98,109 @@ impl From<DeviceType> for u64 {
     }
 }
 
-pub fn open(path: &Path, flags: OFlag, mode: Mode) -> Result<OwnedFd> {
-    nix::fcntl::open(path, flags, mode)
-        .map(|fd| unsafe { OwnedFd::from_raw_fd(fd) })
-        .with_context(|| format!("while opening {:?}", path))
-}
-
-pub fn mount<S: AsRef<Path>, D: AsRef<Path>, T, O>(
-    src: Option<S>,
-    dest: D,
-    ty: Option<T>,
-    mut flags: MsFlags,
-    options: Option<O>,
-) -> Result<()>
-where
-    T: AsRef<OsStr>,
-    O: AsRef<OsStr>,
-{
-    let src = src.as_ref().map(AsRef::as_ref);
-    let dest = dest.as_ref();
-    let ty = ty.as_ref().map(AsRef::as_ref);
-    let options = options.as_ref().map(AsRef::as_ref);
-
-    if options == Some(&BIND) {
-        flags |= MsFlags::MS_BIND;
-    }
-
-    nix::mount::mount(src, dest, ty, flags, options)
-        .with_context(|| format!("while mounting {:?}", dest))
-}
-
-pub fn bind(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<()> {
+#[tracing::instrument(level = "trace", skip_all, fields(src = ?src.as_ref(), dest = ?dest.as_ref()), err(Debug))]
+pub fn bind(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> nix::Result<()> {
     let src = src.as_ref();
     let dest = dest.as_ref();
 
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "while creating the containing directory to bind {:?} from {:?}",
-                dest, src
-            )
-        })?;
+        if !parent.exists() {
+            tracing::trace!(?parent, "creating parent directory");
+            std::fs::create_dir_all(parent).map_err(super::std_error_to_nix)?;
+        }
     }
 
     if src.is_dir() {
         if !dest.is_dir() {
-            std::fs::create_dir(dest)
-                .map_err(|e| Errno::from_i32(e.raw_os_error().unwrap_or_default()))
-                .with_context(|| {
-                    format!(
-                        "while creating the target directory {:?} to bind from {:?}",
-                        dest, src
-                    )
-                })?;
+            tracing::trace!(?dest, "creating target directory");
+            std::fs::create_dir(dest).map_err(super::std_error_to_nix)?;
         }
-    } else {
-        std::fs::write(dest, b"")
-            .map_err(|e| Errno::from_i32(e.raw_os_error().unwrap_or_default()))
-            .with_context(|| {
-                format!(
-                    "while creating the target file {:?} to bind from {:?}",
-                    dest, src
-                )
-            })?;
+    } else if !dest.is_file() {
+        tracing::trace!(?dest, "creating target file");
+        std::fs::write(dest, b"").map_err(super::std_error_to_nix)?;
     }
 
     mount(
         Some(src),
         dest,
-        Some(MountType::Bind),
+        Some(&MountType::Bind),
         MsFlags::MS_REC | MsFlags::MS_BIND,
-        None::<&str>,
+        NIX_NONE,
     )
-    .with_context(|| format!("while creating a bind from {:?} to {:?}", src, dest))
 }
 
-pub fn umount(path: &Path, flags: MntFlags) -> Result<()> {
-    nix::mount::umount2(path, flags).with_context(|| format!("while unmounting {:?}", path))
-}
+// Unused: this is the "correct" way to do the first bind in the chroot, but that approach works. Should we care?
+#[tracing::instrument(level = "trace", skip_all, fields(path = ?path.as_ref()), err(Debug))]
+pub fn make_root_private(path: impl AsRef<Path>) -> nix::Result<()> {
+    let path = path.as_ref();
 
-pub fn fchdir(fd: &impl AsRawFd) -> Result<()> {
-    let path = fd.as_raw_fd();
-    nix::unistd::fchdir(path)
-        .with_context(|| format!("while changing directory to fd {:?}", fd.as_raw_fd()))
-}
-
-pub fn chdir(path: &Path) -> Result<()> {
-    nix::unistd::chdir(path).with_context(|| format!("while changing directory to {:?}", path))
-}
-
-pub fn pivot_root(new_root: &Path, put_old: &Path) -> Result<()> {
-    nix::unistd::pivot_root(new_root, put_old).with_context(|| {
-        format!(
-            "while pivoting the root from {:?} to {:?}",
-            put_old, new_root
-        )
-    })
-}
-
-pub fn make_root_private(path: &Path) -> Result<()> {
-    let myself = Process::myself()
-        .with_context(|| format!("while getting information about the current process into order to make the mount that contains {:?} private", path))?;
-
-    let mountinfo = myself.mountinfo().with_context(|| {
-        format!(
-            "while listing the mounts for the current process in order to make the mount that contains {:?} private",
-            path
-        )
-    })?;
-
+    tracing::trace!("finding mount that contains desired chroot");
+    let myself = Process::myself().map_err(super::proc::map_proc_err)?;
+    let mountinfo = myself.mountinfo().map_err(super::proc::map_proc_err)?;
     let parent = mountinfo
         .into_iter()
         .filter(|mi| path.starts_with(&mi.mount_point))
         .max_by(|a, b| a.mount_point.len().cmp(&b.mount_point.len()))
-        .ok_or(anyhow::anyhow!(
-            "the mount that contains {:?} could not be determined",
-            path
-        ))
-        .with_context(|| {
-            format!(
-                "while finding the mount that contains {:?} in order to make it private",
-                path
-            )
-        })?;
+        .ok_or(nix::errno::Errno::ENOENT)?;
 
+    tracing::trace!(?parent, "found parent mount");
     if parent
         .opt_fields
         .iter()
         .any(|field| matches!(field, MountOptFields::Shared(_)))
     {
+        tracing::trace!("making mount point private",);
         mount(
-            None::<&str>,
+            NIX_NONE,
             &parent.mount_point,
-            None::<&str>,
+            NIX_NONE,
             MsFlags::MS_PRIVATE | MsFlags::MS_REC,
-            None::<&str>,
-        )
-        .with_context(|| format!("while making {:?} a private mount", parent.mount_point))?;
+            NIX_NONE,
+        )?;
+    } else {
+        tracing::trace!("mount point is already private");
     }
 
     Ok(())
 }
 
-pub fn chroot(path: &Path) -> Result<()> {
+#[tracing::instrument(level = "trace", skip_all, fields(path = ?path.as_ref()), err(Debug))]
+pub fn chroot(path: impl AsRef<Path>) -> nix::Result<()> {
+    let path = path.as_ref();
+
+    tracing::trace!("creating an explicit private mount at the new root");
     mount(
         Some(path),
         path,
-        None::<&str>,
-        MsFlags::MS_BIND | MsFlags::MS_REC,
-        None::<&str>,
-    )
-    .with_context(|| format!("while binding {:?} to itself in order to pivot", path))?;
+        NIX_NONE,
+        MsFlags::MS_PRIVATE | MsFlags::MS_BIND | MsFlags::MS_REC,
+        NIX_NONE,
+    )?;
 
-    let newroot =
-        open(path, OFlag::O_DIRECTORY | OFlag::O_RDONLY, Mode::empty()).with_context(|| {
-            format!(
-                "while opening the source directory {:?} in order to pivot to it",
-                path
-            )
-        })?;
+    tracing::trace!("opening a fd at the new root");
+    let newroot = open(path, OFlag::O_DIRECTORY | OFlag::O_RDONLY, Mode::empty())
+        .map(|v| unsafe { OwnedFd::from_raw_fd(v) })?;
 
+    tracing::trace!("pivoting to the new root");
     // pivot root usually changes the root directory to first argument, and then mounts the original root directory at
     // second argument. Giving same path for both stacks mapping of the original root directory above the new directory
     // at the same path, then the call to umount unmounts the original root directory from this path.
-    pivot_root(path, path).with_context(|| format!("while pivoting to {:?}", path))?;
+    nix::unistd::pivot_root(path, path)?;
 
+    tracing::trace!("making the new root a recursive slave mount");
     mount(
-        None::<&str>,
+        NIX_NONE,
         "/",
-        None::<&str>,
+        NIX_NONE,
         MsFlags::MS_SLAVE | MsFlags::MS_REC,
-        None::<&str>,
-    )
-    .with_context(|| {
-        format!(
-            "while marking the new root as a slave in order to complete pivot to {:?}",
-            path
-        )
-    })?;
+        NIX_NONE,
+    )?;
 
-    umount(Path::new("/"), MntFlags::MNT_DETACH).with_context(|| {
-        format!(
-            "while unmounting the old root in order to complete the pivot to {:?}",
-            path
-        )
-    })?;
+    tracing::trace!("unmounting the old root");
+    umount2("/", MntFlags::MNT_DETACH)?;
 
-    fchdir(&newroot)
-        .with_context(|| format!("while switching to the newly pivoted root at {:?}", path))?;
+    tracing::trace!("changing directory to the new root");
+    fchdir(newroot.as_raw_fd())?;
 
     Ok(())
 }

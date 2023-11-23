@@ -4,11 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
 use nix::{
-    mount::MsFlags,
-    sched::CloneFlags,
-    unistd::{Gid, Uid},
+    mount::{mount, MsFlags},
+    sys::personality::Persona,
+    unistd::{sethostname, Gid, Uid},
 };
 use npk_util::io::{timeout_async, wait_for_file_async};
 use tokio::net::UnixStream;
@@ -16,8 +15,9 @@ use tokio::net::UnixStream;
 use crate::unix::SOCKET_TIMEOUT;
 
 use super::{
-    fs::{bind, mount, MountType},
+    fs::{bind, MountType},
     zygote::SpawnRequest,
+    NIX_NONE,
 };
 
 pub async fn main(
@@ -26,150 +26,173 @@ pub async fn main(
     socket_path: PathBuf,
     rootfs_path: PathBuf,
 ) -> isize {
+    #[tracing::instrument(name = "child_main", level = "trace", skip_all, fields(?sandbox_path), err(Debug))]
     async fn imp(
-        req: SpawnRequest,
+        _req: SpawnRequest,
         sandbox_path: PathBuf,
         socket_path: PathBuf,
         rootfs_path: PathBuf,
-    ) -> Result<()> {
+    ) -> nix::Result<()> {
+        tracing::trace!(
+            ?socket_path,
+            "waiting for controller socket to appear on the filesystem"
+        );
+
         wait_for_file_async(socket_path.as_path())
             .await
-            .with_context(|| {
-                "while waiting for the controller socket to appear in the filesystem"
-            })?;
+            .map_err(super::std_error_to_nix)?;
 
-        let socket = timeout_async(SOCKET_TIMEOUT, UnixStream::connect(socket_path.as_path()))
+        tracing::trace!("connecting to controller");
+
+        let _socket = timeout_async(SOCKET_TIMEOUT, UnixStream::connect(socket_path.as_path()))
             .await
-            .with_context(|| "while connecting to controller process")?;
+            .map_err(super::std_error_to_nix)?;
 
-        super::user::set_id(Uid::from_raw(0), Gid::from_raw(0), Vec::default())
-            .with_context(|| "while updating the user and group ids")?;
+        tracing::info!("connected to controller");
 
-        super::proc::disable_aslr().with_context(|| "while disabling ASLR")?;
-        super::proc::set_hostname("localhost").with_context(|| "while setting the hostname")?;
+        tracing::trace!("becoming root");
 
-        init_rootfs(rootfs_path.as_path()).with_context(|| "while initializing sandbox")?;
+        super::user::set_id(Uid::from_raw(0), Gid::from_raw(0), Vec::default())?;
 
-        tracing::debug!("sandbox initialized");
+        tracing::trace!("disabling ASLR");
+        super::proc::change_personality(|p| p | Persona::ADDR_NO_RANDOMIZE)?;
+
+        tracing::trace!("setting hostname to localhost");
+        sethostname("localhost")?;
+
+        tracing::trace!(?rootfs_path, "initializing rootfs");
+        init_rootfs(rootfs_path.as_path())?;
+
+        tracing::info!("sandbox initialized");
+
+        super::fs::chroot(rootfs_path.as_path())?;
 
         Ok(())
     }
-    if let Err(e) = imp(req, sandbox_path, socket_path, rootfs_path).await {
-        eprintln!("sandbox failed: {:?}", e);
+
+    if let Err(error) = imp(req, sandbox_path, socket_path, rootfs_path).await {
+        tracing::error!(?error, "failed to start sandbox");
         -1
     } else {
         0
     }
 }
 
-fn init_rootfs(root: &Path) -> Result<()> {
-    create_dir_all(root).with_context(|| "while creating the directory for the root fs")?;
-    set_permissions(root, Permissions::from_mode(0o700))
-        .with_context(|| "while changing the root permissions")?;
+#[tracing::instrument(level = "trace", err(Debug))]
+fn init_rootfs(root: &Path) -> nix::Result<()> {
+    tracing::trace!("creating rootfs dir");
+    create_dir_all(root).map_err(super::std_error_to_nix)?;
+    set_permissions(root, Permissions::from_mode(0o700)).map_err(super::std_error_to_nix)?;
 
+    tracing::trace!("creating /tmp");
     let tmp = root.join("tmp");
-    create_dir_all(tmp.as_path()).with_context(|| "while creating /tmp")?;
+    create_dir_all(tmp.as_path()).map_err(super::std_error_to_nix)?;
     mount(
-        None::<&str>,
+        NIX_NONE,
         &tmp,
-        Some(MountType::TmpFs),
+        Some(&MountType::TmpFs),
         MsFlags::empty(),
-        None::<&str>,
-    )
-    .with_context(|| "while mounting a tmp FS at /tmp")?;
+        NIX_NONE,
+    )?;
 
+    tracing::trace!("creating /etc");
     let etc = root.join("etc");
-    create_dir_all(etc.as_path()).with_context(|| "while creating /etc")?;
+    create_dir_all(etc.as_path()).map_err(super::std_error_to_nix)?;
 
+    tracing::trace!("creating /etc/group");
     let etc_group = etc.join("group");
     write(etc_group, "root:x:0:\nbuilder:!:1000:\nnogroup:x:65534:\n")
-        .with_context(|| "while creating /etc/group")?;
+        .map_err(super::std_error_to_nix)?;
 
+    tracing::trace!("creating /etc/passwd");
     let etc_passwd = etc.join("passwd");
     write(etc_passwd, "root:x:0:0:root:/build:/noshell\nbuilder:x:1000:1000:builder:/build:/noshell\nnobody:x:65534:65534:Nobody:/:/noshell\n")
-        .with_context(|| "while creating /etc/group")?;
+        .map_err(super::std_error_to_nix)?;
 
+    tracing::trace!("creating /etc/hosts");
     let etc_hosts = etc.join("hosts");
     std::fs::write(etc_hosts, "127.0.0.1 localhost\n::1 localhost\n")
-        .with_context(|| "while creating /etc/hosts")?;
+        .map_err(super::std_error_to_nix)?;
 
+    tracing::trace!("creating /etc/dev");
     let dev = root.join("dev");
 
+    tracing::trace!("creating /etc/pts");
     let dev_pts = dev.join("pts");
-    create_dir_all(&dev_pts).with_context(|| "while creating /dev/pts")?;
+    create_dir_all(&dev_pts).map_err(super::std_error_to_nix)?;
 
     if Path::new("/dev/pts/ptmx").exists() {
-        if mount(
-            None::<&str>,
+        tracing::trace!("creating /dev/pts");
+        if let Err(error) = mount(
+            NIX_NONE,
             &dev_pts,
-            Some(MountType::DevPts),
+            Some(&MountType::DevPts),
             MsFlags::empty(),
             Some("newinstance,mode=0620"),
-        )
-        .is_ok()
-        {
-            let ptmx = dev.join("ptmx");
-            symlink("/dev/pts/ptmx", ptmx).with_context(|| "while creating /dev/ptmx")?;
-            set_permissions(dev.join("dev/pts/ptmx"), Permissions::from_mode(0o666)).ok();
+        ) {
+            tracing::debug!(?error, "failed to mount devpts, falling back to bind");
+            bind("/dev/pts", &dev_pts)?;
+            bind("/dev/ptmx", dev.join("ptmx"))?;
         } else {
-            bind(Path::new("/dev/pts"), &dev_pts)
-                .with_context(|| "while binding /dev/pts to the host /dev/pts")?;
-            bind(Path::new("/dev/ptmx"), dev.join("ptmx"))
-                .with_context(|| "while binding /dev/pts to the host /dev/pts")?;
+            let ptmx = dev.join("ptmx");
+            symlink("/dev/pts/ptmx", ptmx).map_err(super::std_error_to_nix)?;
+            set_permissions(dev.join("dev/pts/ptmx"), Permissions::from_mode(0o666)).ok();
         }
     }
 
+    tracing::trace!("creating /dev/shm");
     let dev_shm = dev.join("shm");
-    create_dir_all(&dev_shm).with_context(|| "while creating /dev/shm")?;
+    create_dir_all(&dev_shm).map_err(super::std_error_to_nix)?;
     mount(
-        None::<&str>,
+        NIX_NONE,
         &dev_shm,
-        Some(MountType::TmpFs),
+        Some(&MountType::TmpFs),
         MsFlags::empty(),
-        None::<&str>,
-    )
-    .with_context(|| "while mounting /dev/shm")?;
+        NIX_NONE,
+    )?;
 
+    tracing::trace!("creating /dev/sys");
     let sys = root.join("sys");
-    create_dir_all(&sys).with_context(|| "while creating /sys")?;
+    create_dir_all(&sys).map_err(super::std_error_to_nix)?;
     // Likely to fail in rootlees
-    if let Err(err) = mount(
-        None::<&str>,
+    if let Err(error) = mount(
+        NIX_NONE,
         &sys,
-        Some(MountType::SysFs),
+        Some(&MountType::SysFs),
         MsFlags::empty(),
-        None::<&str>,
+        NIX_NONE,
     ) {
-        tracing::debug!("failed to mount /sys, falling back to a bind: {}", err);
-        bind("/sys", &sys).with_context(|| "while binding /sys")?;
+        tracing::debug!(?error, "failed to mount /sys, falling back to a bind");
+        bind("/sys", &sys)?;
     }
 
+    tracing::trace!("creating /proc");
     let proc = root.join("proc");
-    create_dir_all(&proc).with_context(|| "while creating /proc")?;
+    create_dir_all(&proc).map_err(super::std_error_to_nix)?;
     mount(
-        None::<&str>,
+        NIX_NONE,
         &proc,
-        Some(MountType::Proc),
+        Some(&MountType::Proc),
         MsFlags::empty(),
-        None::<&str>,
-    )
-    .with_context(|| "while mounting /proc")?;
+        NIX_NONE,
+    )?;
 
-    bind(Path::new("/dev/null"), root.join("dev/null"))
-        .with_context(|| "while binding /dev/null")?;
-    bind(Path::new("/dev/zero"), root.join("dev/zero"))
-        .with_context(|| "while binding /dev/zero")?;
-    bind(Path::new("/dev/full"), root.join("dev/full"))
-        .with_context(|| "while binding /dev/full")?;
-    bind(Path::new("/dev/random"), root.join("dev/random"))
-        .with_context(|| "while binding /dev/random")?;
-    bind(Path::new("/dev/urandom"), root.join("dev/urandom"))
-        .with_context(|| "while binding /dev/urandom")?;
+    tracing::trace!("creating /dev/null");
+    bind("/dev/null", dev.join("null"))?;
+    tracing::trace!("creating /dev/zero");
+    bind("/dev/zero", dev.join("zero"))?;
+    tracing::trace!("creating /dev/full");
+    bind("/dev/full", dev.join("full"))?;
+    tracing::trace!("creating /dev/random");
+    bind("/dev/random", dev.join("random"))?;
+    tracing::trace!("creating /dev/urandom");
+    bind("/dev/urandom", dev.join("urandom"))?;
 
-    symlink("/proc/self/fd", root.join("dev/fd"))?;
-    symlink("/proc/self/fd/0", root.join("dev/stdin"))?;
-    symlink("/proc/self/fd/1", root.join("dev/stdout"))?;
-    symlink("/proc/self/fd/2", root.join("dev/stderr"))?;
+    tracing::trace!("symlinks fds");
+    symlink("/proc/self/fd", dev.join("fd")).map_err(super::std_error_to_nix)?;
+    symlink("/proc/self/fd/0", dev.join("stdin")).map_err(super::std_error_to_nix)?;
+    symlink("/proc/self/fd/1", dev.join("stdout")).map_err(super::std_error_to_nix)?;
+    symlink("/proc/self/fd/2", dev.join("stderr")).map_err(super::std_error_to_nix)?;
 
     Ok(())
 }

@@ -38,7 +38,6 @@ pub struct SpawnResponse {
 mod sync {
     use std::{io::Write, os::unix::net::UnixStream};
 
-    use anyhow::{Context, Result};
     use npk_util::io::Buffer;
     use serde::{Deserialize, Serialize};
 
@@ -47,22 +46,19 @@ mod sync {
     pub fn read_from_socket<'a, T: Deserialize<'a>>(
         buffer: &'a mut Buffer,
         socket: &mut UnixStream,
-    ) -> Result<T> {
-        let b = buffer
-            .read_buf(socket, ZYGOTE_HEADER_SIZE)
-            .with_context(|| "while reading packet header")?;
+    ) -> std::io::Result<T> {
+        let b = buffer.read_buf(socket, ZYGOTE_HEADER_SIZE)?;
         let len = usize::from_ne_bytes(b[..USIZE_SIZE].try_into().unwrap());
         let crc = u64::from_ne_bytes(b[USIZE_SIZE..].try_into().unwrap());
 
-        let b = buffer
-            .read_buf(socket, len)
-            .with_context(|| "while reading request data")?;
+        let b = buffer.read_buf(socket, len)?;
         if crc != crate::unix::CRC.checksum(b) {
-            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData))
-                .with_context(|| "while reading request data");
+            return Err(std::io::ErrorKind::InvalidData.into());
         }
-        let request =
-            bincode::deserialize::<T>(b).with_context(|| "while deserializing request")?;
+        let request = bincode::deserialize::<T>(b).map_err(|error| {
+            tracing::error!(?error, "failed to deserialize request");
+            std::io::Error::from(std::io::ErrorKind::InvalidData)
+        })?;
         Ok(request)
     }
 
@@ -70,27 +66,24 @@ mod sync {
         mut buffer: &mut Buffer,
         socket: &mut UnixStream,
         value: &T,
-    ) -> Result<()> {
+    ) -> std::io::Result<()> {
         buffer.clear();
-        buffer
-            .write_all(&[0u8; ZYGOTE_HEADER_SIZE])
-            .with_context(|| "while writing the response header")?;
-        bincode::serialize_into(&mut buffer, value)
-            .with_context(|| "while writing the response data")?;
+        buffer.write_all(&[0u8; ZYGOTE_HEADER_SIZE])?;
+        bincode::serialize_into(&mut buffer, value).map_err(|error| {
+            tracing::error!(?error, "failed to serialized request");
+            std::io::Error::from(std::io::ErrorKind::Other)
+        })?;
         let data = buffer.data_mut();
         let len = data.len() - ZYGOTE_HEADER_SIZE;
         let crc = CRC.checksum(&data[ZYGOTE_HEADER_SIZE..]);
         data[..USIZE_SIZE].copy_from_slice(&len.to_ne_bytes());
         data[USIZE_SIZE..ZYGOTE_HEADER_SIZE].copy_from_slice(&crc.to_ne_bytes());
-        buffer
-            .flush_to(socket)
-            .with_context(|| "while writing the packet to the socket")?;
+        buffer.flush_to(socket)?;
         Ok(())
     }
 }
 
 mod asy {
-    use anyhow::{Context, Result};
     use npk_util::io::Buffer;
     use serde::{Deserialize, Serialize};
     use tokio::net::UnixStream;
@@ -100,24 +93,19 @@ mod asy {
     pub async fn read_from_socket_async<'a, T: Deserialize<'a>>(
         buffer: &'a mut Buffer,
         socket: &mut UnixStream,
-    ) -> Result<T> {
-        let b = buffer
-            .read_buf_async(socket, ZYGOTE_HEADER_SIZE)
-            .await
-            .with_context(|| "while reading packet header")?;
+    ) -> std::io::Result<T> {
+        let b = buffer.read_buf_async(socket, ZYGOTE_HEADER_SIZE).await?;
         let len = usize::from_ne_bytes(b[..USIZE_SIZE].try_into().unwrap());
         let crc = u64::from_ne_bytes(b[USIZE_SIZE..].try_into().unwrap());
 
-        let b = buffer
-            .read_buf_async(socket, len)
-            .await
-            .with_context(|| "while reading request data")?;
+        let b = buffer.read_buf_async(socket, len).await?;
         if crc != crate::unix::CRC.checksum(b) {
-            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData))
-                .with_context(|| "while reading request data")?;
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
-        let request =
-            bincode::deserialize::<T>(b).with_context(|| "while deserializing request")?;
+        let request = bincode::deserialize::<T>(b).map_err(|error| {
+            tracing::error!(?error, "failed to deserialize request");
+            std::io::Error::from(std::io::ErrorKind::InvalidData)
+        })?;
         Ok(request)
     }
 
@@ -125,23 +113,20 @@ mod asy {
         mut buffer: &mut Buffer,
         socket: &mut UnixStream,
         value: &T,
-    ) -> Result<()> {
+    ) -> std::io::Result<()> {
         use std::io::Write;
         buffer.clear();
-        buffer
-            .write_all(&[0u8; ZYGOTE_HEADER_SIZE])
-            .with_context(|| "while writing the response header")?;
-        bincode::serialize_into(&mut buffer, value)
-            .with_context(|| "while writing the response data")?;
+        buffer.write_all(&[0u8; ZYGOTE_HEADER_SIZE])?;
+        bincode::serialize_into(&mut buffer, value).map_err(|error| {
+            tracing::error!(?error, "failed to serialized request");
+            std::io::Error::from(std::io::ErrorKind::Other)
+        })?;
         let data = buffer.data_mut();
         let len = data.len() - ZYGOTE_HEADER_SIZE;
         let crc = CRC.checksum(&data[ZYGOTE_HEADER_SIZE..]);
         data[..USIZE_SIZE].copy_from_slice(&len.to_ne_bytes());
         data[USIZE_SIZE..ZYGOTE_HEADER_SIZE].copy_from_slice(&crc.to_ne_bytes());
-        buffer
-            .flush_to_async(socket)
-            .await
-            .with_context(|| "while writing the packet to the socket")?;
+        buffer.flush_to_async(socket).await?;
         Ok(())
     }
 }

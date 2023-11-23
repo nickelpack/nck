@@ -3,7 +3,7 @@
 
 use std::{path::PathBuf, process::ExitCode};
 
-use npk_sandbox::current::{flavor::Config, Mappings};
+use npk_sandbox::current::{flavor::Config, Controller, Mappings};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -16,21 +16,31 @@ fn main() -> ExitCode {
 
     let mut mappings = Mappings::default();
     mappings
-        .push_uid_range(0, 165537..=166537)
+        .push_uid_range(0, 165537..=165538)
         .unwrap()
-        .push_gid_range(0, 165537..=166537)
+        .push_gid_range(0, 165537..=165538)
+        .unwrap()
+        .push_uid_range(1000, 165538..=166539)
+        .unwrap()
+        .push_gid_range(1000, 165538..=165539)
         .unwrap();
-    npk_sandbox::current::flavor::main(
+    if let Err(err) = npk_sandbox::current::flavor::main(
         Config {
             working_dir: PathBuf::from("/tmp/npk4"),
             mappings,
         },
-        async move |mut c| {
-            c.spawn_sandbox().await?;
-
-            Ok(())
-        },
-    )
+        Ok(()),
+        async move |mut c| controller_main(&mut c).await,
+    ) {
+        eprintln!("failed: {:?}", err);
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
-fn controller_main() {}
+async fn controller_main(c: &mut Controller) -> anyhow::Result<()> {
+    c.spawn_sandbox().await?;
+
+    Ok(())
+}
