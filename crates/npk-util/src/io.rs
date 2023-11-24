@@ -112,7 +112,9 @@ impl Deref for TempFile {
 
 impl Drop for TempFile {
     fn drop(&mut self) {
-        self.delete_impl().ok();
+        if let Err(error) = self.delete_impl() {
+            tracing::error!(?error, "failed to clean up {:?}", self.path);
+        }
     }
 }
 
@@ -161,6 +163,10 @@ impl TempDir {
         }
 
         Err(std::io::ErrorKind::AlreadyExists.into())
+    }
+
+    pub fn as_path(&self) -> &Path {
+        self.path.as_path()
     }
 
     pub fn forget(mut self) -> PathBuf {

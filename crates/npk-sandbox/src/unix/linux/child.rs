@@ -1,6 +1,9 @@
 use std::{
     fs::{create_dir_all, set_permissions, write, Permissions},
-    os::unix::{fs::symlink, prelude::*},
+    os::unix::{
+        fs::{chown, symlink},
+        prelude::*,
+    },
     path::{Path, PathBuf},
 };
 
@@ -9,7 +12,7 @@ use nix::{
     sys::personality::Persona,
     unistd::{sethostname, Gid, Uid},
 };
-use npk_util::io::{timeout_async, wait_for_file_async};
+use npk_util::io::{timeout_async, wait_for_file_async, TempDir};
 use tokio::net::UnixStream;
 
 use crate::unix::SOCKET_TIMEOUT;
@@ -20,18 +23,12 @@ use super::{
     NIX_NONE,
 };
 
-pub async fn main(
-    req: SpawnRequest,
-    sandbox_path: PathBuf,
-    socket_path: PathBuf,
-    rootfs_path: PathBuf,
-) -> isize {
+pub async fn main(req: SpawnRequest, sandbox_path: PathBuf, socket_path: PathBuf) -> isize {
     #[tracing::instrument(name = "child_main", level = "trace", skip_all, fields(?sandbox_path), err(Debug))]
     async fn imp(
         req: SpawnRequest,
         sandbox_path: PathBuf,
         socket_path: PathBuf,
-        rootfs_path: PathBuf,
     ) -> nix::Result<()> {
         if let Err(error) = prctl::set_name(&req.name) {
             let error = nix::Error::from_i32(error);
@@ -65,17 +62,21 @@ pub async fn main(
         tracing::trace!("setting hostname to localhost");
         sethostname("localhost")?;
 
+        tracing::trace!("creating rootfs directory");
+        let rootfs_path = TempDir::new_in(sandbox_path.as_path())
+            .map_err(super::std_error_to_nix)?
+            .forget();
+
         tracing::trace!(?rootfs_path, "initializing rootfs");
         init_rootfs(rootfs_path.as_path())?;
 
-        tracing::info!("sandbox initialized");
-
         super::fs::chroot(rootfs_path.as_path())?;
 
+        tracing::info!("sandbox initialized");
         Ok(())
     }
 
-    if let Err(error) = imp(req, sandbox_path, socket_path, rootfs_path).await {
+    if let Err(error) = imp(req, sandbox_path, socket_path).await {
         tracing::error!(?error, "failed to start sandbox");
         -1
     } else {

@@ -16,6 +16,7 @@ once_cell.workspace = true
 parking_lot.workspace = true
 serde = { workspace = true, features = [ "derive"] }
 bitflags = { workspace = true, features = [ "serde" ] }
+config.workspace = true
 
 async-lock = "3"
 flume = "0.11"

@@ -1,6 +1,10 @@
 mod proto;
 
-use std::{os::unix::net::UnixStream, path::PathBuf};
+use std::{
+    fs::Permissions,
+    os::unix::{net::UnixStream, prelude::PermissionsExt},
+    path::PathBuf,
+};
 
 use nix::sched::{clone, CloneFlags};
 use npk_util::io::{timeout, wait_for_file, Buffer, TempDir};
@@ -19,7 +23,7 @@ pub fn main(cfg: super::Config) -> nix::Result<()> {
         tracing::warn!(?error, "failed to set zygote process name");
     }
 
-    let socket_path = cfg.working_dir.join(SOCKET_NAME);
+    let socket_path = cfg.runtime_dir.join(SOCKET_NAME);
     tracing::trace!(
         ?socket_path,
         "waiting for the controller socket to appear on the filesystem"
@@ -61,22 +65,14 @@ pub fn main(cfg: super::Config) -> nix::Result<()> {
             Request::Spawn(request) => {
                 tracing::debug!(?request, "received spawn request");
 
-                let (pid, sandbox_path, socket_path, rootfs_path) =
-                    spawn_sandbox(cfg.clone(), request)?;
+                let (pid, sandbox_path, socket_path) = spawn_sandbox(cfg.clone(), request)?;
 
-                tracing::trace!(
-                    ?pid,
-                    ?sandbox_path,
-                    ?socket_path,
-                    ?rootfs_path,
-                    "spawned sandbox process"
-                );
+                tracing::trace!(?pid, ?sandbox_path, ?socket_path, "spawned sandbox process");
 
                 let response = SpawnResponse {
                     pid: pid.inner().as_raw(),
                     sandbox_path,
                     socket_path,
-                    rootfs_path,
                 };
 
                 tracing::trace!("writing response to socket");
@@ -90,29 +86,27 @@ pub fn main(cfg: super::Config) -> nix::Result<()> {
 }
 
 #[tracing::instrument(level = "trace", skip_all, err(Debug))]
-fn spawn_sandbox(
-    cfg: Config,
-    req: SpawnRequest,
-) -> nix::Result<(ChildProcess, PathBuf, PathBuf, PathBuf)> {
+fn spawn_sandbox(cfg: Config, req: SpawnRequest) -> nix::Result<(ChildProcess, PathBuf, PathBuf)> {
     tracing::trace!("allocating temporary directory");
-    let sandbox_path = TempDir::new_in(cfg.working_dir.as_path())
+    let sandbox_path = TempDir::new_in(cfg.runtime_dir.as_path())
         .map_err(super::std_error_to_nix)?
         .forget();
+    std::fs::set_permissions(sandbox_path.as_path(), Permissions::from_mode(0o772))
+        .inspect_err(|_| {
+            std::fs::remove_dir_all(sandbox_path.as_path()).ok();
+        })
+        .map_err(super::std_error_to_nix)?;
     tracing::trace!(?sandbox_path, "temporary directory allocated");
 
     let mut socket_path = sandbox_path.clone();
     socket_path.set_extension("socket");
 
-    let rootfs_path = sandbox_path.join("rootfs");
-
     let cloned_sandbox_path = sandbox_path.clone();
     let cloned_socket_path = socket_path.clone();
-    let cloned_rootfs_path = rootfs_path.clone();
     let cloned_req = req.clone();
     let cb = Box::new(move || {
         let cloned_sandbox_path = cloned_sandbox_path.clone();
         let cloned_socket_path = cloned_socket_path.clone();
-        let cloned_rootfs_path = cloned_rootfs_path.clone();
         let cloned_req = cloned_req.clone();
 
         // This thread has novel safety requirements, so abandon it as quickly as possible.
@@ -126,7 +120,6 @@ fn spawn_sandbox(
                     cloned_req,
                     cloned_sandbox_path,
                     cloned_socket_path,
-                    cloned_rootfs_path,
                 ))
         })
         .join();
@@ -153,12 +146,26 @@ fn spawn_sandbox(
         std::fs::remove_dir_all(sandbox_path.as_path()).ok();
     })?;
 
-    tracing::debug!(?pid, "created sandbox process from zygote");
+    tracing::trace!(?pid, "created sandbox process from zygote");
 
     let pid: ChildProcess = pid.into();
 
-    tracing::debug!(?cfg.mappings, "applying requested user mappings");
-    cfg.mappings.apply(Some(pid.inner()))?;
+    let mut mappings = super::Mappings::default();
+    mappings
+        .push_uid_range(0, req.root_uid..=(req.root_uid + 1))
+        .unwrap();
+    mappings
+        .push_gid_range(0, req.root_gid..=(req.root_gid + 1))
+        .unwrap();
+    mappings
+        .push_uid_range(1000, req.user_uid..=(req.user_uid + 1))
+        .unwrap();
+    mappings
+        .push_gid_range(1000, req.user_gid..=(req.user_gid + 1))
+        .unwrap();
 
-    Ok((pid, sandbox_path, socket_path, rootfs_path))
+    tracing::trace!(?mappings, "applying requested user mappings");
+    mappings.apply(Some(pid.inner()))?;
+
+    Ok((pid, sandbox_path, socket_path))
 }

@@ -38,7 +38,7 @@ where
     F: std::future::Future<Output = R>,
 {
     let zygote = {
-        let socket_path = cfg.working_dir.join(super::zygote::SOCKET_NAME);
+        let socket_path = cfg.runtime_dir.join(super::zygote::SOCKET_NAME);
         if socket_path.exists() {
             tracing::debug!(?socket_path, "deleting existing socket");
             if let Err(error) = std::fs::remove_file(socket_path.as_path()) {
@@ -88,10 +88,10 @@ impl Controller {
             &mut self.zygote,
             &Request::Spawn(SpawnRequest {
                 name: "npk-sandbox-01".to_string(),
-                root_uid: 0,
-                root_gid: 0,
-                user_uid: 0,
-                user_gid: 0,
+                root_uid: 100_000,
+                root_gid: 100_000,
+                user_uid: 100_001,
+                user_gid: 100_001,
             }),
         )
         .await?;
@@ -121,7 +121,6 @@ impl Controller {
             pid: Pid::from_raw(response.pid).into(),
             socket,
             working_dir: response.sandbox_path.into(),
-            rootfs_path: response.rootfs_path,
         })
     }
 }
@@ -131,5 +130,4 @@ pub struct Sandbox {
     pid: ChildProcess,
     socket: UnixStream,
     working_dir: TempDir,
-    rootfs_path: PathBuf,
 }

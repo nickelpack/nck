@@ -1,9 +1,10 @@
 #![feature(result_option_inspect)]
 #![feature(async_closure)]
 
-use std::{path::PathBuf, process::ExitCode};
+use std::process::ExitCode;
 
-use npk_sandbox::current::{flavor::Config, Controller, Mappings};
+use config::Environment;
+use npk_sandbox::current::Controller;
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -14,23 +15,14 @@ fn main() -> ExitCode {
 
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
 
-    let mut mappings = Mappings::default();
-    mappings
-        .push_uid_range(0, 165537..=165538)
-        .unwrap()
-        .push_gid_range(0, 165537..=165538)
-        .unwrap()
-        .push_uid_range(1000, 165538..=166539)
-        .unwrap()
-        .push_gid_range(1000, 165538..=165539)
+    let config = config::Config::builder()
+        .add_source(Environment::with_prefix("npk").separator("__"))
+        .build()
         .unwrap();
-    let result = npk_sandbox::current::flavor::main(
-        Config {
-            working_dir: PathBuf::from("/tmp/npk"),
-            mappings,
-        },
-        controller_main,
-    );
+    dbg!(&config);
+    let config = config.try_deserialize().unwrap();
+
+    let result = npk_sandbox::current::flavor::main(config, controller_main);
     match result {
         Some(Err(error)) => {
             tracing::error!(?error, "controller failed");

@@ -7,3 +7,4 @@ edition = "2021"
 thiserror.workspace = true
 tokio = {workspace = true, features = []}
 rand.workspace = true
+tracing.workspace = true

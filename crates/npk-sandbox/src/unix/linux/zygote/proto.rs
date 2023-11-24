@@ -33,7 +33,6 @@ pub struct SpawnResponse {
     pub pid: i32,
     pub sandbox_path: PathBuf,
     pub socket_path: PathBuf,
-    pub rootfs_path: PathBuf,
 }
 
 mod sync {
