@@ -9,11 +9,13 @@
       export = true;
       drvConfig = {
         mkDerivation = {
-          buildInputs = with pkgs; [mold llvmPackages.clangUseLLVM];
+          buildInputs = with pkgs; [llvmPackages.clangUseLLVM llvmPackages.bintools];
         };
       };
     };
     nci.crates.npk = {};
-    nci.crates.npk-build = {};
+    nci.crates.npk-daemon = {};
+    nci.crates.npk-sandbox = {};
+    nci.crates.npk-util = {};
   };
 }

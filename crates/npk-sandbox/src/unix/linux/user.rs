@@ -67,6 +67,16 @@ pub enum InvalidMapping {
 }
 
 impl Mappings {
+    pub fn push_uid(&mut self, namespace: Uid, parent: Uid) -> &mut Self {
+        self.uids.push((namespace.as_raw(), parent.as_raw(), 1));
+        self
+    }
+
+    pub fn push_gid(&mut self, namespace: Gid, parent: Gid) -> &mut Self {
+        self.gids.push((namespace.as_raw(), parent.as_raw(), 1));
+        self
+    }
+
     pub fn push_uid_range(
         &mut self,
         namespace_uid: u32,

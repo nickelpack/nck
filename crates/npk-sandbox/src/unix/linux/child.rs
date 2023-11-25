@@ -1,6 +1,6 @@
 use std::{
     fs::{create_dir_all, set_permissions, write, Permissions},
-    os::unix::{fs::symlink, prelude::*},
+    os::unix::{fs::symlink, prelude::PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -12,6 +12,7 @@ use nix::{
     unistd::{fork, sethostname, ForkResult, Gid, Pid, Uid},
 };
 use npk_util::io::{timeout, timeout_async, wait_for_file, TempDir};
+use remoc::rtc;
 use signal_hook::{
     consts::{SIGCHLD, SIGHUP, SIGINT, SIGQUIT, SIGTERM},
     iterator::Signals,
@@ -25,11 +26,12 @@ use crate::{
 
 use super::{
     fs::{bind, MountType},
+    proto::SandboxError,
     zygote::SpawnRequest,
     NIX_NONE,
 };
 
-#[tracing::instrument(level = "trace", skip_all, fields(name = req.name))]
+#[tracing::instrument(level = "trace", skip_all, fields(name = req.name()))]
 pub fn main(req: SpawnRequest, sandbox_path: PathBuf, socket_path: PathBuf) -> isize {
     fn wait_for_controller(sandbox_path: &Path, socket_path: &Path) -> nix::Result<TempMount> {
         tracing::trace!("entering remaining namespaces");
@@ -67,8 +69,8 @@ pub fn main(req: SpawnRequest, sandbox_path: PathBuf, socket_path: PathBuf) -> i
     };
 
     match unsafe { fork() } {
-        Ok(ForkResult::Parent { child }) => supervisor(&req.name, child, rootfs_dir),
-        Ok(ForkResult::Child) => sandbox(&req.name, socket_path, rootfs_dir.forget()),
+        Ok(ForkResult::Parent { child }) => supervisor(req.name(), child, rootfs_dir),
+        Ok(ForkResult::Child) => sandbox(req.name(), socket_path, rootfs_dir.forget()),
         Err(error) => {
             tracing::error!(
                 ?error,
@@ -124,13 +126,8 @@ fn sandbox(name: &str, socket_path: PathBuf, rootfs_path: PathBuf) -> isize {
             tracing::warn!(?error, "failed to set sandbox process name");
         }
 
-        tracing::trace!("connecting to controller");
-
-        let _socket = timeout_async(SOCKET_TIMEOUT, UnixStream::connect(socket_path.as_path()))
-            .await
-            .map_err(super::std_error_to_nix)?;
-
-        tracing::info!("connected to controller");
+        tracing::trace!(?rootfs_path, "initializing rootfs");
+        init_rootfs(rootfs_path.as_path())?;
 
         tracing::trace!("disabling ASLR");
         super::proc::change_personality(|p| p | Persona::ADDR_NO_RANDOMIZE)?;
@@ -138,13 +135,38 @@ fn sandbox(name: &str, socket_path: PathBuf, rootfs_path: PathBuf) -> isize {
         tracing::trace!("setting hostname to localhost");
         sethostname("localhost")?;
 
-        tracing::trace!(?rootfs_path, "initializing rootfs");
-        init_rootfs(rootfs_path.as_path())?;
+        tracing::trace!("connecting to controller");
 
-        super::fs::pivot(rootfs_path.as_path())?;
+        let socket = timeout_async(SOCKET_TIMEOUT, UnixStream::connect(socket_path.as_path()))
+            .await
+            .map_err(super::std_error_to_nix)?;
 
-        tracing::info!("sandbox initialized");
-        Ok(())
+        let sandbox = SandboxProcess {
+            rootfs_path,
+            remote: None,
+        };
+        let (server, client) = super::proto::connect::<
+            super::proto::SandboxProcessServerSharedMut<SandboxProcess, _>,
+            SandboxProcess,
+            super::proto::ControllerProcessClient,
+        >(socket, sandbox, 1)
+        .await?;
+
+        {
+            let mut sandbox = server.write().await;
+            sandbox.remote = Some(client);
+        }
+
+        match server.wait().await {
+            Ok(_) => {
+                tracing::info!("controller disconnected");
+                Ok(())
+            }
+            Err(error) => {
+                tracing::error!(?error, "RPC failed");
+                Err(nix::Error::EPIPE)
+            }
+        }
     }
 
     match tokio::runtime::Builder::new_multi_thread()
@@ -280,4 +302,24 @@ fn init_rootfs(root: &Path) -> nix::Result<()> {
     symlink("/proc/self/fd/2", dev.join("stderr")).map_err(super::std_error_to_nix)?;
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct SandboxProcess {
+    rootfs_path: PathBuf,
+    remote: Option<super::proto::ControllerProcessClient>,
+}
+
+#[rtc::async_trait]
+impl super::proto::SandboxProcess for SandboxProcess {
+    async fn isolate_network(&mut self) -> Result<(), SandboxError> {
+        Ok(())
+    }
+    async fn isolate_filesystem(&mut self) -> Result<(), SandboxError> {
+        tracing::trace!(
+            "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGgg"
+        );
+        super::fs::pivot(self.rootfs_path.as_path())?;
+        Ok(())
+    }
 }

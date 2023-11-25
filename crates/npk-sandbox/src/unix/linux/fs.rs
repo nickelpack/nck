@@ -241,11 +241,12 @@ impl Drop for TempMount {
     fn drop(&mut self) {
         let path = std::mem::take(&mut self.0);
         if !path.is_empty() {
-            if let Err(error) = nix::mount::umount2(path.as_path(), MntFlags::MNT_DETACH) {
-                tracing::error!(?error, ?path, "failed to unmount");
-            } else {
-                tracing::trace!(?path, "unmounted tmp");
+            match nix::mount::umount2(path.as_path(), MntFlags::MNT_DETACH) {
+                Err(nix::Error::ENOENT) => tracing::trace!("temporary directory not mounted"),
+                Err(error) => tracing::error!(?error, ?path, "failed to unmount"),
+                Ok(_) => tracing::trace!(?path, "unmounted tmp"),
             }
+            drop(path)
         }
     }
 }

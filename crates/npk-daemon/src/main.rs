@@ -5,12 +5,11 @@ use std::{process::ExitCode, time::Duration};
 
 use config::Environment;
 use npk_sandbox::current::Controller;
-use tracing::Level;
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::EnvFilter;
 
 fn main() -> ExitCode {
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::TRACE)
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
@@ -19,7 +18,6 @@ fn main() -> ExitCode {
         .add_source(Environment::with_prefix("npk").separator("__"))
         .build()
         .unwrap();
-    dbg!(&config);
     let config = config.try_deserialize().unwrap();
 
     let result = npk_sandbox::current::flavor::main(config, controller_main);
@@ -33,8 +31,10 @@ fn main() -> ExitCode {
 }
 
 async fn controller_main(mut c: Controller) -> anyhow::Result<()> {
-    c.spawn_sandbox().await?;
+    let mut sb = c.spawn_sandbox().await?;
+    sb.isolate_filesystem().await;
     tokio::time::sleep(Duration::from_secs(5)).await;
+    drop(sb);
 
     Ok(())
 }

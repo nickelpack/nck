@@ -11,23 +11,17 @@ thiserror.workspace = true
 rand.workspace = true
 tracing = { workspace = true, features = [ "attributes"] }
 tokio = { workspace = true, features = [ "net", "rt", "rt-multi-thread", "time", "macros", "io-util" ] }
-futures.workspace = true
-once_cell.workspace = true
-parking_lot.workspace = true
 serde = { workspace = true, features = [ "derive"] }
 bitflags = { workspace = true, features = [ "serde" ] }
 config.workspace = true
 
-async-lock = "3"
-flume = "0.11"
-remoc = { version = "0.11", default-features = false, features = [ "rtc", "serde", "default-codec-bincode" ]}
-bincode = "1"
-crc = "3"
-signal-hook = "0.3"
-
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = "0.16"
 prctl = "1"
+signal-hook = "0.3"
+remoc = { version = "0.11", default-features = false, features = [ "rtc", "serde", "default-codec-bincode" ]}
+bitcode = "0.5"
+crc = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies.nix]
 version = "0.27"

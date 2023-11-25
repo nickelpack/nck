@@ -17,7 +17,7 @@ What I found was that there's a nasty catch-22 surrounding the chroot directory.
 creates the directory, then the subuid won't have permissions to change it. If the subuid creates the directory then
 the superuid won't be able to delete it. This is where the supervisor (which the zygote creates with a `clone`) comes
 into play: it waits for the zygote to assign its subuid/subgid, creates the rootfs directory, and then immediately forks
-to the sandbox process. All the supervisor does it wait around to be signaled, either by its parent (the zygote) or by
+to the sandbox process. All the supervisor does is wait around to be signaled, either by its parent (the zygote) or by
 the child. When either happens it cleans up the rootfs. You can't give anything on the FS to another user in linux
 without root, for security reasons - so that's not an option.
 

@@ -1,5 +1,6 @@
-use nix::unistd::Pid;
+use nix::unistd::{Gid, Uid};
 use npk_util::io::{timeout_async, Buffer, TempDir, TempFile};
+use remoc::rtc;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::{
@@ -9,7 +10,10 @@ use crate::{
     unix::{SOCKET_TIMEOUT, ZYGOTE_HEADER_SIZE},
 };
 
-use super::proc::ChildProcess;
+use super::{
+    proc::ChildProcess,
+    proto::{SandboxProcess, ServerWorker},
+};
 
 pub(crate) fn main<F, R>(
     cfg: super::Config,
@@ -66,6 +70,7 @@ where
         zygote: zygote.0,
         write_buffer: Buffer::with_capacity(ZYGOTE_HEADER_SIZE),
         read_buffer: Buffer::with_capacity(ZYGOTE_HEADER_SIZE),
+        bitcode_buffer: bitcode::Buffer::with_capacity(1024),
     };
 
     Ok(f(controller).await)
@@ -76,6 +81,7 @@ pub struct Controller {
     zygote: UnixStream,
     write_buffer: Buffer,
     read_buffer: Buffer,
+    bitcode_buffer: bitcode::Buffer,
 }
 
 impl Controller {
@@ -85,49 +91,87 @@ impl Controller {
 
         write_to_socket_async(
             &mut self.write_buffer,
+            &mut self.bitcode_buffer,
             &mut self.zygote,
-            &Request::Spawn(SpawnRequest {
-                name: "npk-sandbox-01".to_string(),
-                root_uid: self.cfg.id_map.uid_min,
-                root_gid: self.cfg.id_map.gid_min,
-                user_uid: self.cfg.id_map.uid_min + 1,
-                user_gid: self.cfg.id_map.gid_min + 1,
-            }),
+            &Request::Spawn(SpawnRequest::new(
+                "npk-sandbox-01",
+                Uid::from_raw(self.cfg.id_map.uid_min),
+                Gid::from_raw(self.cfg.id_map.gid_min),
+                Uid::from_raw(self.cfg.id_map.uid_min + 1),
+                Gid::from_raw(self.cfg.id_map.gid_min + 1),
+            )),
         )
         .await?;
 
         tracing::trace!("request sent");
 
-        let response: SpawnResponse =
-            read_from_socket_async(&mut self.read_buffer, &mut self.zygote).await?;
+        let response: SpawnResponse = read_from_socket_async(
+            &mut self.read_buffer,
+            &mut self.bitcode_buffer,
+            &mut self.zygote,
+        )
+        .await?;
 
         tracing::trace!("response received");
 
         let socket = {
-            let listener = UnixListener::bind(response.socket_path.as_path())?;
+            let listener = UnixListener::bind(response.socket_path())?;
 
             tracing::debug!(
-                ?response.socket_path,
+                socket_path = ?response.socket_path(),
                 "waiting for sandbox to connect",
             );
 
-            let _socket_path = TempFile::from(response.socket_path);
+            let _socket_path = TempFile::from(response.socket_path());
 
             timeout_async(SOCKET_TIMEOUT, listener.accept()).await?.0
         };
 
-        tracing::info!("sandbox connected");
+        let (server, client) = super::proto::connect::<
+            super::proto::ControllerProcessServerSharedMut<ControllerProcess, _>,
+            ControllerProcess,
+            super::proto::SandboxProcessClient,
+        >(socket, ControllerProcess { remote: None }, 1)
+        .await?;
+
+        {
+            let mut sandbox = server.write().await;
+            sandbox.remote = Some(client);
+        }
+
         Ok(Sandbox {
-            pid: Pid::from_raw(response.pid).into(),
-            socket,
-            working_dir: TempDir::from(response.sandbox_path.as_path()),
+            _drop_pid: response.pid().into(),
+            _drop_working_dir: TempDir::from(response.sandbox_path()),
+            server,
         })
     }
 }
 
 #[derive(Debug)]
 pub struct Sandbox {
-    pid: ChildProcess,
-    socket: UnixStream,
-    working_dir: TempDir,
+    server: ServerWorker<ControllerProcess>,
+
+    _drop_pid: ChildProcess,
+    _drop_working_dir: TempDir,
+}
+
+#[derive(Debug)]
+struct ControllerProcess {
+    remote: Option<super::proto::SandboxProcessClient>,
+}
+
+#[rtc::async_trait]
+impl super::proto::ControllerProcess for ControllerProcess {}
+
+impl Sandbox {
+    pub async fn isolate_filesystem(&mut self) {
+        let mut server = self.server.write().await;
+        server
+            .remote
+            .as_mut()
+            .unwrap()
+            .isolate_filesystem()
+            .await
+            .unwrap()
+    }
 }

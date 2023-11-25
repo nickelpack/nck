@@ -1,7 +1,6 @@
 #[cfg(target_os = "linux")]
 pub mod linux;
 
-use serde::Deserialize;
 use std::time::Duration;
 
 use crc::Crc;

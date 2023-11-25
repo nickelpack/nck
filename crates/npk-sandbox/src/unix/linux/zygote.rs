@@ -6,7 +6,10 @@ use std::{
     path::PathBuf,
 };
 
-use nix::sched::{clone, CloneFlags};
+use nix::{
+    sched::{clone, CloneFlags},
+    unistd::{Gid, Uid},
+};
 use npk_util::io::{timeout, wait_for_file, Buffer, TempDir};
 pub use proto::*;
 
@@ -44,10 +47,11 @@ pub fn main(cfg: super::Config) -> nix::Result<()> {
 
     let mut read_buffer = Buffer::with_capacity(ZYGOTE_HEADER_SIZE);
     let mut write_buffer = Buffer::with_capacity(ZYGOTE_HEADER_SIZE);
+    let mut bitcode_buffer = bitcode::Buffer::with_capacity(1024);
     let mut previous_pid = None::<ChildProcess>;
     loop {
         tracing::trace!("reading next request from controller");
-        let request = match read_from_socket(&mut read_buffer, &mut socket) {
+        let request = match read_from_socket(&mut read_buffer, &mut bitcode_buffer, &mut socket) {
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 tracing::info!("controller closed the connection");
                 break Ok(());
@@ -70,15 +74,16 @@ pub fn main(cfg: super::Config) -> nix::Result<()> {
 
                 tracing::trace!(?pid, ?sandbox_path, ?socket_path, "spawned sandbox process");
 
-                let response = SpawnResponse {
-                    pid: pid.inner().as_raw(),
-                    sandbox_path,
-                    socket_path,
-                };
+                let response = SpawnResponse::new(pid.inner(), sandbox_path, socket_path);
 
                 tracing::trace!("writing response to socket");
-                write_to_socket(&mut write_buffer, &mut socket, &response)
-                    .map_err(super::std_error_to_nix)?;
+                write_to_socket(
+                    &mut write_buffer,
+                    &mut bitcode_buffer,
+                    &mut socket,
+                    &response,
+                )
+                .map_err(super::std_error_to_nix)?;
                 sandbox_dir.forget();
 
                 previous_pid = Some(pid);
@@ -87,7 +92,7 @@ pub fn main(cfg: super::Config) -> nix::Result<()> {
     }
 }
 
-#[tracing::instrument(level = "trace", skip_all, fields(name = req.name), err(Debug))]
+#[tracing::instrument(level = "trace", skip_all, fields(name = req.name()), err(Debug))]
 fn spawn_sandbox(cfg: Config, req: SpawnRequest) -> nix::Result<(ChildProcess, TempDir, PathBuf)> {
     tracing::trace!("allocating temporary directory");
     let sandbox_dir =
@@ -141,17 +146,10 @@ fn spawn_sandbox(cfg: Config, req: SpawnRequest) -> nix::Result<(ChildProcess, T
 
     let mut mappings = super::Mappings::default();
     mappings
-        .push_uid_range(0, req.root_uid..=(req.root_uid + 1))
-        .unwrap();
-    mappings
-        .push_gid_range(0, req.root_gid..=(req.root_gid + 1))
-        .unwrap();
-    mappings
-        .push_uid_range(1000, req.user_uid..=(req.user_uid + 1))
-        .unwrap();
-    mappings
-        .push_gid_range(1000, req.user_gid..=(req.user_gid + 1))
-        .unwrap();
+        .push_uid(Uid::from_raw(0), req.root_uid())
+        .push_gid(Gid::from_raw(0), req.root_gid())
+        .push_uid(Uid::from_raw(1000), req.user_uid())
+        .push_gid(Gid::from_raw(1000), req.user_gid());
 
     tracing::trace!(?mappings, "applying requested user mappings");
     mappings.apply(Some(pid.inner()))?;

@@ -36,8 +36,9 @@
 
         packages.default = outputs.nip.packages.release;
         devShells.default = outputs.nickelpack.devShell.overrideAttrs (old: {
-          packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb];
+          packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb cargo-udeps];
           NPK__LINUX__RUNTIME_DIR = "/tmp/npk";
+          RUST_LOG = "info,npk_sandbox=trace";
           shellHook = ''
             declare -a parts
             try_find() {

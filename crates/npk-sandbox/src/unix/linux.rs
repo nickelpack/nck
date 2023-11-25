@@ -7,8 +7,6 @@ pub mod proto;
 mod user;
 mod zygote;
 
-use std::{fs::Permissions, os::unix::prelude::PermissionsExt};
-
 pub use config::*;
 pub use controller::*;
 use nix::unistd::fork;
