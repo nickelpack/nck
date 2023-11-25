@@ -1,7 +1,7 @@
 #![feature(result_option_inspect)]
 #![feature(async_closure)]
 
-use std::process::ExitCode;
+use std::{process::ExitCode, time::Duration};
 
 use config::Environment;
 use npk_sandbox::current::Controller;
@@ -34,6 +34,7 @@ fn main() -> ExitCode {
 
 async fn controller_main(mut c: Controller) -> anyhow::Result<()> {
     c.spawn_sandbox().await?;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
     Ok(())
 }

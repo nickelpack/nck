@@ -37,6 +37,38 @@
         packages.default = outputs.nip.packages.release;
         devShells.default = outputs.nickelpack.devShell.overrideAttrs (old: {
           packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb];
+          NPK__LINUX__RUNTIME_DIR = "/tmp/npk";
+          shellHook = ''
+            declare -a parts
+            try_find() {
+              id=$1
+              fn=$2
+              parts=( )
+              if line=$(cat "$fn" | grep -E "^$id:[0-9]+:[0-9]+\$" | grep -oE '[0-9]+:[0-9]+$'); then
+                IFS=':' read -r -a parts <<< "$line"
+                start="''${parts[0]}"
+                length="''${parts[1]}"
+                end=$(($start + $length))
+                echo "$start $end"
+                return 0
+              fi
+              return 1
+            }
+
+            if user=$(try_find $(id -u) /etc/subuid) || user=$(try_find $(id -un) /etc/subuid); then
+              parts=( )
+              IFS=' ' read -r -a parts <<< "$user"
+              export NPK__LINUX__ID_MAP__UID_MIN=''${parts[0]}
+              export NPK__LINUX__ID_MAP__UID_MAX=''${parts[1]}
+            fi
+
+            if group=$(try_find $(id -g) /etc/subgid) || group=$(try_find $(id -gn) /etc/subgid); then
+              parts=( )
+              IFS=' ' read -r -a parts <<< "$group"
+              export NPK__LINUX__ID_MAP__GID_MIN=''${parts[0]}
+              export NPK__LINUX__ID_MAP__GID_MAX=''${parts[1]}
+            fi
+          '';
         });
         formatter = pkgs.alejandra;
       };

@@ -122,6 +122,14 @@ pub struct TempDir {
     path: PathBuf,
 }
 
+impl Default for TempDir {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+        }
+    }
+}
+
 const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 

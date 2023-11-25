@@ -1,21 +1,27 @@
 use std::{
     fs::{create_dir_all, set_permissions, write, Permissions},
-    os::unix::{
-        fs::{chown, symlink},
-        prelude::*,
-    },
+    os::unix::{fs::symlink, prelude::*},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use nix::{
     mount::{mount, MsFlags},
+    sched::{unshare, CloneFlags},
     sys::personality::Persona,
-    unistd::{sethostname, Gid, Uid},
+    unistd::{fork, sethostname, ForkResult, Gid, Pid, Uid},
 };
-use npk_util::io::{timeout_async, wait_for_file_async, TempDir};
+use npk_util::io::{timeout, timeout_async, wait_for_file, TempDir};
+use signal_hook::{
+    consts::{SIGCHLD, SIGHUP, SIGINT, SIGQUIT, SIGTERM},
+    iterator::Signals,
+};
 use tokio::net::UnixStream;
 
-use crate::unix::SOCKET_TIMEOUT;
+use crate::{
+    current::flavor::{fs::TempMount, proc::ChildProcess},
+    unix::SOCKET_TIMEOUT,
+};
 
 use super::{
     fs::{bind, MountType},
@@ -23,26 +29,100 @@ use super::{
     NIX_NONE,
 };
 
-pub async fn main(req: SpawnRequest, sandbox_path: PathBuf, socket_path: PathBuf) -> isize {
-    #[tracing::instrument(name = "child_main", level = "trace", skip_all, fields(?sandbox_path), err(Debug))]
-    async fn imp(
-        req: SpawnRequest,
-        sandbox_path: PathBuf,
-        socket_path: PathBuf,
-    ) -> nix::Result<()> {
-        if let Err(error) = prctl::set_name(&req.name) {
-            let error = nix::Error::from_i32(error);
-            tracing::warn!(?error, "failed to set zygote process name");
-        }
+#[tracing::instrument(level = "trace", skip_all, fields(name = req.name))]
+pub fn main(req: SpawnRequest, sandbox_path: PathBuf, socket_path: PathBuf) -> isize {
+    fn wait_for_controller(sandbox_path: &Path, socket_path: &Path) -> nix::Result<TempMount> {
+        tracing::trace!("entering remaining namespaces");
+        let flags = CloneFlags::CLONE_NEWPID
+            | CloneFlags::CLONE_NEWUTS
+            | CloneFlags::CLONE_NEWCGROUP
+            | CloneFlags::CLONE_NEWIPC;
+        unshare(flags)?;
 
         tracing::trace!(
             ?socket_path,
             "waiting for the controller socket to appear on the filesystem"
         );
-
-        wait_for_file_async(socket_path.as_path())
-            .await
+        timeout(Duration::from_secs(5), || wait_for_file(socket_path))
             .map_err(super::std_error_to_nix)?;
+
+        // The zugote is in charge of newuidmap/newgidmap, so if the controller socket has appeared on the filesystem
+        // it means that the mapping has occurred and the result has been received by the controller.
+        tracing::trace!("becoming root");
+        super::user::set_id(Uid::from_raw(0), Gid::from_raw(0), Vec::default())?;
+
+        tracing::trace!("creating rootfs directory");
+        let temp = TempDir::new_in(sandbox_path).map_err(super::std_error_to_nix)?;
+
+        tracing::trace!("mounting rootfs directory as tmpfs");
+        temp.try_into()
+    }
+
+    let rootfs_dir = match wait_for_controller(sandbox_path.as_path(), socket_path.as_path()) {
+        Err(error) => {
+            tracing::error!(?error, "failed to initialize child process");
+            return -1;
+        }
+        Ok(result) => result,
+    };
+
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child }) => supervisor(&req.name, child, rootfs_dir),
+        Ok(ForkResult::Child) => sandbox(&req.name, socket_path, rootfs_dir.forget()),
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                "failed to fork child process to supervisor and sandbox"
+            );
+            -1
+        }
+    }
+}
+
+#[tracing::instrument(level = "trace", skip_all)]
+fn supervisor(name: &str, child: Pid, rootfs_dir: TempMount) -> isize {
+    fn imp(name: &str, child: ChildProcess, rootfs_dir: TempMount) -> nix::Result<()> {
+        if let Err(error) = prctl::set_name(format!("super-{}", name).as_str()) {
+            let error = nix::Error::from_i32(error);
+            tracing::warn!(?error, "failed to set supervisor process name");
+        }
+
+        tracing::trace!("waiting for a signal");
+        let mut signals = Signals::new([SIGINT, SIGTERM, SIGQUIT, SIGHUP, SIGCHLD])
+            .map_err(super::std_error_to_nix)?;
+
+        match signals.forever().next() {
+            Some(SIGINT) => tracing::trace!("got SIGINT"),
+            Some(SIGTERM) => tracing::trace!("got SIGTERM"),
+            Some(SIGQUIT) => tracing::trace!("got SIGQUIT"),
+            Some(SIGCHLD) => tracing::trace!("child process exited"),
+            Some(other) => tracing::trace!(other, "got unknown signal"),
+            None => {}
+        }
+
+        tracing::trace!("cleaning up filesystem");
+        // Ensure that NLL doesn't drop these early
+        drop(rootfs_dir);
+        drop(child);
+        Ok(())
+    }
+
+    let child_proc: ChildProcess = child.into();
+    if let Err(error) = imp(name, child_proc, rootfs_dir) {
+        tracing::error!(?error, "supervisor failed");
+        -1
+    } else {
+        0
+    }
+}
+
+#[tracing::instrument(level = "trace", skip_all)]
+fn sandbox(name: &str, socket_path: PathBuf, rootfs_path: PathBuf) -> isize {
+    async fn imp(name: &str, socket_path: PathBuf, rootfs_path: PathBuf) -> nix::Result<()> {
+        if let Err(error) = prctl::set_name(name) {
+            let error = nix::Error::from_i32(error);
+            tracing::warn!(?error, "failed to set sandbox process name");
+        }
 
         tracing::trace!("connecting to controller");
 
@@ -52,42 +132,41 @@ pub async fn main(req: SpawnRequest, sandbox_path: PathBuf, socket_path: PathBuf
 
         tracing::info!("connected to controller");
 
-        tracing::trace!("becoming root");
-
-        super::user::set_id(Uid::from_raw(0), Gid::from_raw(0), Vec::default())?;
-
         tracing::trace!("disabling ASLR");
         super::proc::change_personality(|p| p | Persona::ADDR_NO_RANDOMIZE)?;
 
         tracing::trace!("setting hostname to localhost");
         sethostname("localhost")?;
 
-        tracing::trace!("creating rootfs directory");
-        let rootfs_path = TempDir::new_in(sandbox_path.as_path())
-            .map_err(super::std_error_to_nix)?
-            .forget();
-
         tracing::trace!(?rootfs_path, "initializing rootfs");
         init_rootfs(rootfs_path.as_path())?;
 
-        super::fs::chroot(rootfs_path.as_path())?;
+        super::fs::pivot(rootfs_path.as_path())?;
 
         tracing::info!("sandbox initialized");
         Ok(())
     }
 
-    if let Err(error) = imp(req, sandbox_path, socket_path).await {
-        tracing::error!(?error, "failed to start sandbox");
-        -1
-    } else {
-        0
+    match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map(|runtime| runtime.block_on(imp(name, socket_path, rootfs_path)))
+    {
+        Ok(Err(error)) => {
+            tracing::error!(?error, "sandbox process failed");
+            -1
+        }
+        Err(error) => {
+            tracing::error!(?error, "failed to start tokio runtime");
+            -1
+        }
+        _ => 0,
     }
 }
 
-#[tracing::instrument(level = "trace", err(Debug))]
+#[tracing::instrument(level = "trace", skip_all, err(Debug))]
 fn init_rootfs(root: &Path) -> nix::Result<()> {
-    tracing::trace!("creating rootfs dir");
-    create_dir_all(root).map_err(super::std_error_to_nix)?;
+    tracing::trace!(?root, "initializing rootfs directory");
     set_permissions(root, Permissions::from_mode(0o700)).map_err(super::std_error_to_nix)?;
 
     tracing::trace!("creating /tmp");

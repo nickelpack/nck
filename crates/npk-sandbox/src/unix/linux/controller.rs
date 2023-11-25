@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use nix::unistd::Pid;
 use npk_util::io::{timeout_async, Buffer, TempDir, TempFile};
 use tokio::net::{UnixListener, UnixStream};
@@ -64,6 +62,7 @@ where
 
     tracing::info!("zygote connected");
     let controller = Controller {
+        cfg,
         zygote: zygote.0,
         write_buffer: Buffer::with_capacity(ZYGOTE_HEADER_SIZE),
         read_buffer: Buffer::with_capacity(ZYGOTE_HEADER_SIZE),
@@ -73,6 +72,7 @@ where
 }
 
 pub struct Controller {
+    cfg: super::Config,
     zygote: UnixStream,
     write_buffer: Buffer,
     read_buffer: Buffer,
@@ -88,10 +88,10 @@ impl Controller {
             &mut self.zygote,
             &Request::Spawn(SpawnRequest {
                 name: "npk-sandbox-01".to_string(),
-                root_uid: 100_000,
-                root_gid: 100_000,
-                user_uid: 100_001,
-                user_gid: 100_001,
+                root_uid: self.cfg.id_map.uid_min,
+                root_gid: self.cfg.id_map.gid_min,
+                user_uid: self.cfg.id_map.uid_min + 1,
+                user_gid: self.cfg.id_map.gid_min + 1,
             }),
         )
         .await?;
@@ -120,7 +120,7 @@ impl Controller {
         Ok(Sandbox {
             pid: Pid::from_raw(response.pid).into(),
             socket,
-            working_dir: response.sandbox_path.into(),
+            working_dir: TempDir::from(response.sandbox_path.as_path()),
         })
     }
 }

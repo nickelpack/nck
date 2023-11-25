@@ -1422,6 +1422,7 @@ dependencies = [
  "rand 0.8.5",
  "remoc",
  "serde",
+ "signal-hook",
  "thiserror",
  "tokio",
  "tracing",

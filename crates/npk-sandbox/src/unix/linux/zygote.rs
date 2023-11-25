@@ -65,7 +65,8 @@ pub fn main(cfg: super::Config) -> nix::Result<()> {
             Request::Spawn(request) => {
                 tracing::debug!(?request, "received spawn request");
 
-                let (pid, sandbox_path, socket_path) = spawn_sandbox(cfg.clone(), request)?;
+                let (pid, sandbox_dir, socket_path) = spawn_sandbox(cfg.clone(), request)?;
+                let sandbox_path = sandbox_dir.as_path().to_path_buf();
 
                 tracing::trace!(?pid, ?sandbox_path, ?socket_path, "spawned sandbox process");
 
@@ -78,6 +79,7 @@ pub fn main(cfg: super::Config) -> nix::Result<()> {
                 tracing::trace!("writing response to socket");
                 write_to_socket(&mut write_buffer, &mut socket, &response)
                     .map_err(super::std_error_to_nix)?;
+                sandbox_dir.forget();
 
                 previous_pid = Some(pid);
             }
@@ -85,12 +87,13 @@ pub fn main(cfg: super::Config) -> nix::Result<()> {
     }
 }
 
-#[tracing::instrument(level = "trace", skip_all, err(Debug))]
-fn spawn_sandbox(cfg: Config, req: SpawnRequest) -> nix::Result<(ChildProcess, PathBuf, PathBuf)> {
+#[tracing::instrument(level = "trace", skip_all, fields(name = req.name), err(Debug))]
+fn spawn_sandbox(cfg: Config, req: SpawnRequest) -> nix::Result<(ChildProcess, TempDir, PathBuf)> {
     tracing::trace!("allocating temporary directory");
-    let sandbox_path = TempDir::new_in(cfg.runtime_dir.as_path())
-        .map_err(super::std_error_to_nix)?
-        .forget();
+    let sandbox_dir =
+        TempDir::new_in(cfg.runtime_dir.as_path()).map_err(super::std_error_to_nix)?;
+    let sandbox_path = sandbox_dir.as_path().to_path_buf();
+
     std::fs::set_permissions(sandbox_path.as_path(), Permissions::from_mode(0o772))
         .inspect_err(|_| {
             std::fs::remove_dir_all(sandbox_path.as_path()).ok();
@@ -111,16 +114,7 @@ fn spawn_sandbox(cfg: Config, req: SpawnRequest) -> nix::Result<(ChildProcess, P
 
         // This thread has novel safety requirements, so abandon it as quickly as possible.
         let result = std::thread::spawn(move || {
-            super::proc::close_range(3, None).unwrap();
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-                .block_on(super::child::main(
-                    cloned_req,
-                    cloned_sandbox_path,
-                    cloned_socket_path,
-                ))
+            super::child::main(cloned_req, cloned_sandbox_path, cloned_socket_path)
         })
         .join();
 
@@ -131,12 +125,7 @@ fn spawn_sandbox(cfg: Config, req: SpawnRequest) -> nix::Result<(ChildProcess, P
         }
     });
 
-    let flags = CloneFlags::CLONE_NEWPID
-        | CloneFlags::CLONE_NEWUSER
-        | CloneFlags::CLONE_NEWNS
-        | CloneFlags::CLONE_NEWUTS
-        | CloneFlags::CLONE_NEWCGROUP
-        | CloneFlags::CLONE_NEWIPC;
+    let flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS;
 
     tracing::trace!("cloning current process to sandbox process");
 
@@ -167,5 +156,5 @@ fn spawn_sandbox(cfg: Config, req: SpawnRequest) -> nix::Result<(ChildProcess, P
     tracing::trace!(?mappings, "applying requested user mappings");
     mappings.apply(Some(pid.inner()))?;
 
-    Ok((pid, sandbox_path, socket_path))
+    Ok((pid, sandbox_dir, socket_path))
 }

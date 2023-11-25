@@ -23,6 +23,7 @@ flume = "0.11"
 remoc = { version = "0.11", default-features = false, features = [ "rtc", "serde", "default-codec-bincode" ]}
 bincode = "1"
 crc = "3"
+signal-hook = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = "0.16"
