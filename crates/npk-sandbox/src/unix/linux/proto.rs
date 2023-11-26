@@ -35,7 +35,7 @@ pub trait SandboxProcess {
 #[rtc::remote]
 pub trait ControllerProcess {}
 
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all)]
 pub async fn connect<S, L, R>(
     socket: UnixStream,
     local_server: L,

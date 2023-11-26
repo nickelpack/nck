@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use nix::unistd::{Gid, Uid};
 use npk_util::io::{timeout_async, Buffer, TempDir, TempFile};
 use remoc::rtc;
@@ -11,31 +13,17 @@ use crate::{
 };
 
 use super::{
-    proc::ChildProcess,
     proto::{SandboxProcess, ServerWorker},
+    syscall::ChildProcess,
+    syscall::{Result, Syscall},
 };
 
-pub(crate) fn main<F, R>(
+#[tracing::instrument(name = "controller_main", level = "trace", skip_all)]
+pub async fn main<SC: Syscall, F, R>(
     cfg: super::Config,
-    child: ChildProcess,
-    f: impl FnOnce(Controller) -> F,
-) -> nix::Result<R>
-where
-    F: std::future::Future<Output = R>,
-{
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(main_async(cfg, &child, f))
-}
-
-#[tracing::instrument(name = "controller_main", level = "trace", skip_all, err(Debug))]
-async fn main_async<F, R>(
-    cfg: super::Config,
-    _: &ChildProcess,
-    f: impl FnOnce(Controller) -> F,
-) -> nix::Result<R>
+    _child: ChildProcess<SC>,
+    f: impl FnOnce(Controller<SC>) -> F,
+) -> Result<R>
 where
     F: std::future::Future<Output = R>,
 {
@@ -43,7 +31,7 @@ where
         let socket_path = cfg.runtime_dir.join(super::zygote::SOCKET_NAME);
         if socket_path.exists() {
             tracing::debug!(?socket_path, "deleting existing socket");
-            if let Err(error) = std::fs::remove_file(socket_path.as_path()) {
+            if let Err(error) = SC::remove_file(socket_path.as_path()) {
                 tracing::warn!(
                     ?error,
                     ?socket_path,
@@ -52,16 +40,13 @@ where
             }
         }
 
-        let listener =
-            UnixListener::bind(socket_path.as_path()).map_err(super::std_error_to_nix)?;
+        let listener = UnixListener::bind(socket_path.as_path())?;
 
         // Make sure the socket file gets cleaned up
         let _socket_file = TempFile::from(socket_path.as_path());
 
         tracing::info!(?socket_path, "listening for zygote");
-        timeout_async(SOCKET_TIMEOUT, listener.accept())
-            .await
-            .map_err(super::std_error_to_nix)?
+        timeout_async(SOCKET_TIMEOUT, listener.accept()).await?
     };
 
     tracing::info!("zygote connected");
@@ -71,23 +56,25 @@ where
         write_buffer: Buffer::with_capacity(ZYGOTE_HEADER_SIZE),
         read_buffer: Buffer::with_capacity(ZYGOTE_HEADER_SIZE),
         bitcode_buffer: bitcode::Buffer::with_capacity(1024),
+        _phantom: PhantomData,
     };
 
     Ok(f(controller).await)
 }
 
-pub struct Controller {
+pub struct Controller<SC: Syscall> {
     cfg: super::Config,
     zygote: UnixStream,
     write_buffer: Buffer,
     read_buffer: Buffer,
     bitcode_buffer: bitcode::Buffer,
+    _phantom: PhantomData<SC>,
 }
 
-impl Controller {
-    #[tracing::instrument(level = "trace", skip_all, err(Debug))]
-    pub async fn spawn_sandbox(&mut self) -> std::io::Result<Sandbox> {
-        tracing::debug!("requesting new sandbox from zygote");
+impl<SC: Syscall> Controller<SC> {
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn spawn_sandbox(&mut self) -> std::io::Result<Sandbox<SC>> {
+        tracing::trace!("requesting new sandbox from zygote");
 
         write_to_socket_async(
             &mut self.write_buffer,
@@ -148,10 +135,10 @@ impl Controller {
 }
 
 #[derive(Debug)]
-pub struct Sandbox {
+pub struct Sandbox<SC: Syscall> {
     server: ServerWorker<ControllerProcess>,
 
-    _drop_pid: ChildProcess,
+    _drop_pid: ChildProcess<SC>,
     _drop_working_dir: TempDir,
 }
 
@@ -163,7 +150,7 @@ struct ControllerProcess {
 #[rtc::async_trait]
 impl super::proto::ControllerProcess for ControllerProcess {}
 
-impl Sandbox {
+impl<SC: Syscall> Sandbox<SC> {
     pub async fn isolate_filesystem(&mut self) {
         let mut server = self.server.write().await;
         server

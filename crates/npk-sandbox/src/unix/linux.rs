@@ -1,55 +1,97 @@
-mod child;
 mod config;
 mod controller;
-mod fs;
-mod proc;
 pub mod proto;
-mod user;
+mod sandbox;
+mod supervisor;
 mod zygote;
 
+mod syscall;
+
+use std::future::Future;
+
 pub use config::*;
-pub use controller::*;
-use nix::unistd::fork;
-pub use user::Mappings;
+pub use controller::Sandbox;
 
-const NIX_NONE: Option<&[u8]> = None::<&[u8]>;
+use syscall::{Result, Syscall};
 
-pub fn std_error_to_nix(error: std::io::Error) -> nix::Error {
-    nix::Error::from_i32(error.raw_os_error().unwrap_or_else(|| {
-        tracing::error!(?error, "unknown IO error");
-        0
-    }))
+use self::syscall::NixSysCall;
+
+pub type Controller = controller::Controller<NixSysCall>;
+
+fn result_to_isize<R, E: std::fmt::Debug>(name: &str, result: std::result::Result<R, E>) -> isize {
+    match result {
+        Ok(_) => 0,
+        Err(error) => {
+            tracing::error!(?error, "{} failed", name);
+            -1
+        }
+    }
 }
 
-pub fn main<F, R>(cfg: crate::Config, f: impl FnOnce(controller::Controller) -> F) -> Option<R>
+async fn result_to_isize_async<F, R, E>(name: &str, result: F) -> isize
+where
+    F: Future<Output = std::result::Result<R, E>>,
+    E: std::fmt::Debug,
+{
+    result_to_isize(name, result.await)
+}
+
+fn in_runtime<F>(future: F) -> std::io::Result<F::Output>
+where
+    F: Future,
+{
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map(|runtime| runtime.block_on(future))
+}
+
+fn result_to_isize_runtime<F, R, E>(name: &str, result: F) -> isize
+where
+    F: Future<Output = std::result::Result<R, E>>,
+    E: std::fmt::Debug,
+{
+    match in_runtime(result) {
+        Ok(r) => result_to_isize(name, r),
+        Err(error) => {
+            tracing::error!(?error, "failed to spawn a runtime for {}", name);
+            -1
+        }
+    }
+}
+
+#[tracing::instrument(name = "main", level = "trace", skip_all)]
+pub fn main<F, R>(cfg: crate::Config, f: impl FnOnce(Controller) -> F) -> Option<R>
 where
     F: std::future::Future<Output = R>,
 {
-    #[tracing::instrument(name = "linux_main", level = "trace", skip_all, err(Debug))]
-    pub fn imp<FF, RR>(
-        cfg: Config,
-        f: impl FnOnce(controller::Controller) -> FF,
-    ) -> nix::Result<Option<RR>>
-    where
-        FF: std::future::Future<Output = RR>,
-    {
-        tracing::trace!(working_dir = ?cfg.runtime_dir, "creating working directory");
-        std::fs::create_dir_all(cfg.runtime_dir.as_path()).map_err(std_error_to_nix)?;
+    main_impl::<NixSysCall, _, _>(cfg.linux, f)
+        .inspect_err(|error| tracing::error!(?error, "linux runtime failed"))
+        .unwrap_or(None)
+}
 
-        tracing::trace!("ensuring that child processes retain capabilities");
-        prctl::set_keep_capabilities(true).map_err(nix::Error::from_i32)?;
+#[inline(always)]
+fn main_impl<SC: Syscall + 'static, F, R>(
+    cfg: Config,
+    f: impl FnOnce(controller::Controller<SC>) -> F,
+) -> Result<Option<R>>
+where
+    F: std::future::Future<Output = R>,
+{
+    tracing::trace!(working_dir = ?cfg.runtime_dir, "creating working directory");
+    SC::create_dir_all(cfg.runtime_dir.as_path())?;
 
-        tracing::trace!("forking to controller and zygote");
-        match unsafe { fork() }? {
-            nix::unistd::ForkResult::Parent { child } => {
-                controller::main(cfg, child.into(), f).map(Some)
-            }
-            nix::unistd::ForkResult::Child => {
-                zygote::main(cfg)?;
-                Ok(None)
-            }
+    tracing::trace!("ensuring that child processes retain capabilities");
+    SC::set_keep_capabilities(true)?;
+
+    tracing::trace!("forking to controller and zygote");
+    match SC::fork()? {
+        nix::unistd::ForkResult::Parent { child } => {
+            in_runtime(controller::main(cfg, child.into(), f))?.map(Some)
+        }
+        nix::unistd::ForkResult::Child => {
+            zygote::main::<SC>(cfg)?;
+            Ok(None)
         }
     }
-
-    imp(cfg.linux, f).unwrap()
 }
