@@ -11,14 +11,14 @@ use nix::{
     sys::stat::Mode,
     unistd::{ForkResult, Gid, Uid},
 };
-use npk_util::io::{timeout, wait_for_file, Buffer, TempDir};
+use npk_util::io::{timeout, wait_for_file, TempDir};
 pub use proto::*;
 
-use crate::unix::{SOCKET_TIMEOUT, ZYGOTE_HEADER_SIZE};
+use crate::current::proto::Peer;
 
 use super::{
     syscall::{ChildProcess, Result, Syscall, TempMount},
-    Config,
+    Config, SOCKET_TIMEOUT,
 };
 
 pub const SOCKET_NAME: &str = "zygote.socket";
@@ -48,13 +48,11 @@ pub fn main<SC: Syscall + 'static>(cfg: super::Config) -> Result<()> {
 
     tracing::info!("connected to controller");
 
-    let mut read_buffer = Buffer::with_capacity(ZYGOTE_HEADER_SIZE);
-    let mut write_buffer = Buffer::with_capacity(ZYGOTE_HEADER_SIZE);
-    let mut bitcode_buffer = bitcode::Buffer::with_capacity(1024);
+    let mut peer = Peer::new(socket);
     let mut previous_pid = None::<ChildProcess<SC>>;
     loop {
         tracing::trace!("reading next request from controller");
-        let request = match read_from_socket(&mut read_buffer, &mut bitcode_buffer, &mut socket) {
+        let request = match peer.read() {
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 tracing::info!("controller closed the connection");
                 break Ok(());
@@ -79,12 +77,7 @@ pub fn main<SC: Syscall + 'static>(cfg: super::Config) -> Result<()> {
                 let response = SpawnResponse::new(pid.inner(), sandbox_path, socket_path);
 
                 tracing::trace!("writing response to socket");
-                write_to_socket(
-                    &mut write_buffer,
-                    &mut bitcode_buffer,
-                    &mut socket,
-                    &response,
-                )?;
+                peer.write(&response)?;
                 sandbox_dir.forget();
 
                 previous_pid = Some(pid);

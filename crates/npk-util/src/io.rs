@@ -1,13 +1,52 @@
+use bytes::BytesMut;
+use lockfree_object_pool::LinearObjectPool;
+use once_cell::sync::Lazy;
 use std::{
-    io::{Read, Write},
-    ops::{Deref, Range},
+    io::Read,
+    ops::Deref,
     path::{Path, PathBuf},
     sync::atomic::AtomicUsize,
     time::{Duration, Instant},
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use rand::seq::SliceRandom;
+
+pub fn copy_to_buffer(
+    reader: &mut impl Read,
+    buffer: &mut BytesMut,
+    length: usize,
+) -> std::io::Result<()> {
+    let start = buffer.len();
+    buffer.resize(start + length, 0u8);
+    let mut target = &mut buffer[start..(start + length)];
+    while !target.is_empty() {
+        let len = reader.read(target)?;
+        if len == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        target = &mut target[len..];
+    }
+    Ok(())
+}
+
+pub async fn copy_to_buffer_async(
+    reader: &mut (impl AsyncRead + Unpin),
+    buffer: &mut BytesMut,
+    length: usize,
+) -> std::io::Result<()> {
+    let start = buffer.len();
+    buffer.resize(start + length, 0u8);
+    let mut target = &mut buffer[start..(start + length)];
+    while !target.is_empty() {
+        let len = reader.read(target).await?;
+        if len == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        target = &mut target[len..];
+    }
+    Ok(())
+}
 
 pub async fn timeout_async<R>(
     duration: Duration,
@@ -223,108 +262,5 @@ impl Drop for TempDir {
     }
 }
 
-#[derive(Debug)]
-pub struct Buffer {
-    buf: Vec<u8>,
-    range: Range<usize>,
-}
-
-impl Buffer {
-    #[inline]
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(capacity),
-            range: 0..0,
-        }
-    }
-
-    #[inline]
-    fn ensure_buf(&mut self, length: usize) {
-        if self.buf.len() < length + self.range.start {
-            self.buf.copy_within(self.range.clone(), 0);
-            self.range = 0..(self.range.len());
-            if self.buf.len() < length {
-                self.buf.resize(length, 0);
-            }
-        }
-    }
-
-    #[inline]
-    pub fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.buf[self.range.clone()]
-    }
-
-    #[inline]
-    pub fn read_buf(&mut self, reader: &mut impl Read, length: usize) -> std::io::Result<&[u8]> {
-        self.ensure_buf(length);
-        while self.range.len() < length {
-            let len = reader.read(&mut self.buf[self.range.end..])?;
-            if len == 0 {
-                return Err(std::io::ErrorKind::UnexpectedEof.into());
-            }
-            self.range.end += len;
-        }
-        let result = &self.buf[self.range.start..(self.range.start + length)];
-        self.range.start += length;
-        Ok(result)
-    }
-
-    #[inline]
-    pub async fn read_buf_async<R: AsyncRead + Unpin>(
-        &mut self,
-        reader: &mut R,
-        length: usize,
-    ) -> std::io::Result<&[u8]> {
-        self.ensure_buf(length);
-        while self.range.len() < length {
-            let len = reader.read(&mut self.buf[self.range.end..]).await?;
-            if len == 0 {
-                return Err(std::io::ErrorKind::UnexpectedEof.into());
-            }
-            self.range.end += len;
-        }
-        let result = &self.buf[self.range.start..(self.range.start + length)];
-        self.range.start += length;
-        Ok(result)
-    }
-
-    #[inline]
-    pub fn clear(&mut self) {
-        self.range = 0..0
-    }
-
-    #[inline]
-    pub fn flush_to(&mut self, writer: &mut impl Write) -> std::io::Result<()> {
-        writer.write_all(&self.buf[self.range.clone()])?;
-        self.range = 0..0;
-        self.buf.clear();
-        writer.flush()?;
-        Ok(())
-    }
-
-    #[inline]
-    pub async fn flush_to_async<W: AsyncWrite + Unpin>(
-        &mut self,
-        writer: &mut W,
-    ) -> std::io::Result<()> {
-        writer.write_all(&self.buf[self.range.clone()]).await?;
-        self.range = 0..0;
-        self.buf.clear();
-        writer.flush().await?;
-        Ok(())
-    }
-}
-
-impl Write for Buffer {
-    #[inline]
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let len = Write::write(&mut self.buf, buf)?;
-        self.range.end += len;
-        Ok(len)
-    }
-
-    #[inline]
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
+pub static BUFFER_POOL: Lazy<LinearObjectPool<BytesMut>> =
+    Lazy::new(|| LinearObjectPool::<BytesMut>::new(Default::default, BytesMut::clear));

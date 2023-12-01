@@ -1,21 +1,18 @@
-use std::marker::PhantomData;
+use std::{marker::PhantomData, path::Path, sync::atomic::AtomicU64};
 
 use nix::unistd::{Gid, Uid};
-use npk_util::io::{timeout_async, Buffer, TempDir, TempFile};
-use remoc::rtc;
-use tokio::net::{UnixListener, UnixStream};
-
-use crate::{
-    current::flavor::zygote::{
-        read_from_socket_async, write_to_socket_async, Request, SpawnRequest, SpawnResponse,
-    },
-    unix::{SOCKET_TIMEOUT, ZYGOTE_HEADER_SIZE},
+use npk_util::io::{timeout_async, TempDir, TempFile};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    net::UnixListener,
 };
 
 use super::{
-    proto::{SandboxProcess, ServerWorker},
-    syscall::ChildProcess,
-    syscall::{Result, Syscall},
+    proto::{OverlapPeer, PeerAsync, PeerError},
+    sandbox::SandboxRequest,
+    syscall::{ChildProcess, Result, Syscall},
+    zygote::{Request, SpawnRequest, SpawnResponse},
+    SOCKET_TIMEOUT,
 };
 
 #[tracing::instrument(name = "controller_main", level = "trace", skip_all)]
@@ -52,10 +49,7 @@ where
     tracing::info!("zygote connected");
     let controller = Controller {
         cfg,
-        zygote: zygote.0,
-        write_buffer: Buffer::with_capacity(ZYGOTE_HEADER_SIZE),
-        read_buffer: Buffer::with_capacity(ZYGOTE_HEADER_SIZE),
-        bitcode_buffer: bitcode::Buffer::with_capacity(1024),
+        zygote: PeerAsync::new(zygote.0),
         _phantom: PhantomData,
     };
 
@@ -64,10 +58,7 @@ where
 
 pub struct Controller<SC: Syscall> {
     cfg: super::Config,
-    zygote: UnixStream,
-    write_buffer: Buffer,
-    read_buffer: Buffer,
-    bitcode_buffer: bitcode::Buffer,
+    zygote: PeerAsync,
     _phantom: PhantomData<SC>,
 }
 
@@ -76,28 +67,19 @@ impl<SC: Syscall> Controller<SC> {
     pub async fn spawn_sandbox(&mut self) -> std::io::Result<Sandbox<SC>> {
         tracing::trace!("requesting new sandbox from zygote");
 
-        write_to_socket_async(
-            &mut self.write_buffer,
-            &mut self.bitcode_buffer,
-            &mut self.zygote,
-            &Request::Spawn(SpawnRequest::new(
+        self.zygote
+            .write(&Request::Spawn(SpawnRequest::new(
                 "npk-sandbox-01",
                 Uid::from_raw(self.cfg.id_map.uid_min),
                 Gid::from_raw(self.cfg.id_map.gid_min),
                 Uid::from_raw(self.cfg.id_map.uid_min + 1),
                 Gid::from_raw(self.cfg.id_map.gid_min + 1),
-            )),
-        )
-        .await?;
+            )))
+            .await?;
 
         tracing::trace!("request sent");
 
-        let response: SpawnResponse = read_from_socket_async(
-            &mut self.read_buffer,
-            &mut self.bitcode_buffer,
-            &mut self.zygote,
-        )
-        .await?;
+        let response: SpawnResponse = self.zygote.read().await?;
 
         tracing::trace!("response received");
 
@@ -114,51 +96,75 @@ impl<SC: Syscall> Controller<SC> {
             timeout_async(SOCKET_TIMEOUT, listener.accept()).await?.0
         };
 
-        let (server, client) = super::proto::connect::<
-            super::proto::ControllerProcessServerSharedMut<ControllerProcess, _>,
-            ControllerProcess,
-            super::proto::SandboxProcessClient,
-        >(socket, ControllerProcess { remote: None }, 1)
-        .await?;
-
-        {
-            let mut sandbox = server.write().await;
-            sandbox.remote = Some(client);
-        }
-
+        let peer = OverlapPeer::new(socket);
         Ok(Sandbox {
+            peer,
+            id: Default::default(),
             _drop_pid: response.pid().into(),
             _drop_working_dir: TempDir::from(response.sandbox_path()),
-            server,
         })
     }
 }
 
 #[derive(Debug)]
 pub struct Sandbox<SC: Syscall> {
-    server: ServerWorker<ControllerProcess>,
-
+    peer: OverlapPeer,
+    id: AtomicU64,
     _drop_pid: ChildProcess<SC>,
     _drop_working_dir: TempDir,
 }
 
-#[derive(Debug)]
-struct ControllerProcess {
-    remote: Option<super::proto::SandboxProcessClient>,
-}
-
-#[rtc::async_trait]
-impl super::proto::ControllerProcess for ControllerProcess {}
-
 impl<SC: Syscall> Sandbox<SC> {
-    pub async fn isolate_filesystem(&mut self) {
-        let mut server = self.server.write().await;
-        server
-            .remote
-            .as_mut()
-            .unwrap()
-            .isolate_filesystem()
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn isolate_filesystem(&self) -> std::result::Result<(), PeerError> {
+        self.peer
+            .request_result(&SandboxRequest::IsolateFilesystem)
             .await
-            .unwrap()
+            .map_err(|_| PeerError::IoError)
+            .flatten()
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn write(
+        &self,
+        path: impl AsRef<Path>,
+        data: &mut (impl AsyncRead + Unpin),
+    ) -> std::result::Result<(), PeerError> {
+        let path: Box<[u8]> = path.as_ref().as_os_str().as_encoded_bytes().into();
+        let id = self.id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.peer
+            .request_result::<(), _>(&SandboxRequest::BeginFile(id, path))
+            .await??;
+        tracing::trace!("starting");
+        let result: std::result::Result<(), PeerError> = async move {
+            // TODO: So many allocations
+            loop {
+                let mut buffer = vec![0u8; 4096];
+                buffer.resize(4096, 0u8);
+                let len = data.read(&mut buffer).await?;
+                if len == 0 {
+                    break;
+                }
+                buffer.resize(len, 0u8);
+                let b = buffer.into_boxed_slice();
+                self.peer
+                    .request_result::<(), _>(&SandboxRequest::WriteFile(id, b))
+                    .await??;
+            }
+            Ok(())
+        }
+        .await;
+
+        let end_result = self
+            .peer
+            .request_result::<(), _>(&SandboxRequest::EndFile(id))
+            .await;
+
+        tracing::trace!("done");
+        if result.is_err() {
+            result
+        } else {
+            end_result?
+        }
     }
 }

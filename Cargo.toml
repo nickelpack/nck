@@ -17,6 +17,8 @@ once_cell = "1"
 parking_lot = "0.12"
 bitflags = "2"
 config = "0.13"
+flume = "0.11"
+lockfree-object-pool = "0.1"
 
 npk-sandbox = { path = "./crates/npk-sandbox" }
 npk-util = { path = "./crates/npk-util" }

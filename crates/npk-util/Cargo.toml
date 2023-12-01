@@ -8,3 +8,6 @@ thiserror.workspace = true
 tokio = {workspace = true, features = []}
 rand.workspace = true
 tracing.workspace = true
+lockfree-object-pool.workspace = true
+once_cell.workspace = true
+bytes = "1"

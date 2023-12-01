@@ -7,16 +7,23 @@ mod zygote;
 
 mod syscall;
 
-use std::future::Future;
+use std::{future::Future, time::Duration};
 
 pub use config::*;
 pub use controller::Sandbox;
 
+use crc::Crc;
 use syscall::{Result, Syscall};
 
 use self::syscall::NixSysCall;
 
 pub type Controller = controller::Controller<NixSysCall>;
+
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(2);
+const USIZE_SIZE: usize = std::mem::size_of::<usize>();
+const U64_SIZE: usize = std::mem::size_of::<usize>();
+const ZYGOTE_HEADER_SIZE: usize = USIZE_SIZE + U64_SIZE;
+static CRC: Crc<u64> = Crc::<u64>::new(&crc::CRC_64_REDIS);
 
 fn result_to_isize<R, E: std::fmt::Debug>(name: &str, result: std::result::Result<R, E>) -> isize {
     match result {

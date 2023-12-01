@@ -173,8 +173,8 @@ pub trait Syscall: Send + Sync {
     fn create_dir_all(path: impl AsRef<Path>) -> Result<()>;
     fn create_dir(path: impl AsRef<Path>) -> Result<()>;
     fn touch(path: impl AsRef<Path>) -> Result<()>;
-    fn append(path: impl AsRef<Path>, contents: impl AsRef<str>) -> Result<()>;
-    fn overwrite(path: impl AsRef<Path>, contents: impl AsRef<str>) -> Result<()>;
+    fn append(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<()>;
+    fn overwrite(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<()>;
     fn set_keep_capabilities(keep: bool) -> Result<()>;
     fn remove_file(path: impl AsRef<Path>) -> Result<()>;
     fn set_hostname(hostname: impl AsRef<OsStr>) -> Result<()>;
@@ -475,27 +475,27 @@ impl Syscall for NixSysCall {
 
     #[inline]
     #[tracing::instrument(level = "trace", skip_all, fields(path = ?path.as_ref()))]
-    fn append(path: impl AsRef<Path>, contents: impl AsRef<str>) -> Result<()> {
+    fn append(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(false)
             .append(true)
             .open(path.as_ref())?;
-        file.write_all(contents.as_ref().as_bytes())?;
+        file.write_all(contents.as_ref())?;
         Ok(())
     }
 
     #[inline]
     #[tracing::instrument(level = "trace", skip_all, fields(path = ?path.as_ref()))]
-    fn overwrite(path: impl AsRef<Path>, contents: impl AsRef<str>) -> Result<()> {
+    fn overwrite(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> Result<()> {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .append(false)
             .open(path.as_ref())?;
-        file.write_all(contents.as_ref().as_bytes())?;
+        file.write_all(contents.as_ref())?;
         Ok(())
     }
 

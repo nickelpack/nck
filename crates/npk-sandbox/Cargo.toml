@@ -3,25 +3,27 @@ name = "npk-sandbox"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 npk-util.workspace = true
 thiserror.workspace = true
 rand.workspace = true
 tracing = { workspace = true, features = [ "attributes"] }
-tokio = { workspace = true, features = [ "net", "rt", "rt-multi-thread", "time", "macros", "io-util" ] }
+tokio = { workspace = true, features = [ "net", "rt", "rt-multi-thread", "time", "macros", "io-util", "fs", "sync" ] }
 serde = { workspace = true, features = [ "derive"] }
 bitflags = { workspace = true, features = [ "serde" ] }
 config.workspace = true
+flume.workspace = true
+lockfree-object-pool.workspace = true
+once_cell.workspace = true
+
+bitcode = "0.5"
+crc = "3"
+bytes = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = "0.16"
 prctl = "1"
 signal-hook = "0.3"
-remoc = { version = "0.11", default-features = false, features = [ "rtc", "serde", "default-codec-bincode" ]}
-bitcode = "0.5"
-crc = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies.nix]
 version = "0.27"

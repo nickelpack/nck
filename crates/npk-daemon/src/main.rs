@@ -5,6 +5,7 @@ use std::{process::ExitCode, time::Duration};
 
 use config::Environment;
 use npk_sandbox::current::Controller;
+use tokio::fs::OpenOptions;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> ExitCode {
@@ -20,7 +21,7 @@ fn main() -> ExitCode {
         .unwrap();
     let config = config.try_deserialize().unwrap();
 
-    let result = npk_sandbox::current::flavor::main(config, controller_main);
+    let result = npk_sandbox::current::main(config, controller_main);
     match result {
         Some(Err(error)) => {
             tracing::error!(?error, "controller failed");
@@ -31,9 +32,16 @@ fn main() -> ExitCode {
 }
 
 async fn controller_main(mut c: Controller) -> anyhow::Result<()> {
-    let mut sb = c.spawn_sandbox().await?;
-    sb.isolate_filesystem().await;
+    let sb = c.spawn_sandbox().await?;
+    sb.isolate_filesystem().await?;
+    let mut f = OpenOptions::new()
+        .read(true)
+        .create(false)
+        .open("/tmp/test.txt")
+        .await?;
+    sb.write("/tmp/test2.txt", &mut f).await?;
     tokio::time::sleep(Duration::from_secs(5)).await;
+
     drop(sb);
 
     Ok(())

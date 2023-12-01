@@ -1,21 +1,30 @@
 use std::{
+    collections::HashMap,
+    ffi::OsStr,
+    io::ErrorKind,
     marker::PhantomData,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use bitcode::{Decode, Encode};
 use nix::{
     mount::MsFlags,
     sys::{personality::Persona, stat::Mode},
 };
 use npk_util::io::timeout_async;
-use remoc::rtc;
-use tokio::net::UnixStream;
-
-use crate::unix::SOCKET_TIMEOUT;
+use tokio::{
+    fs::{File, OpenOptions},
+    io::AsyncWriteExt,
+    net::UnixStream,
+    sync::{Mutex, RwLock},
+    task::{JoinError, JoinHandle},
+};
 
 use super::{
-    proto::SandboxError,
-    syscall::{MountType, Result, Syscall, SYS_NONE},
+    proto::{OverlapPeer, PeerError},
+    syscall::{MountType, NixSysCall, Result, Syscall, SYS_NONE},
+    SOCKET_TIMEOUT,
 };
 
 #[tracing::instrument(level = "trace", skip_all)]
@@ -42,35 +51,13 @@ pub async fn main<SC: Syscall + 'static>(
 
     let socket = timeout_async(SOCKET_TIMEOUT, UnixStream::connect(socket_path.as_path())).await?;
 
-    let sandbox = SandboxProcess {
+    let sandbox = SandboxProcess::<SC> {
         rootfs_path,
-        remote: None,
+        remote: OverlapPeer::new(socket),
+        files: Arc::new(RwLock::new(HashMap::new())),
         _phantom: PhantomData,
     };
-    let (server, client) = super::proto::connect::<
-        super::proto::SandboxProcessServerSharedMut<SandboxProcess<SC>, _>,
-        SandboxProcess<SC>,
-        super::proto::ControllerProcessClient,
-    >(socket, sandbox, 1)
-    .await?;
-
-    {
-        let mut sandbox = server.write().await;
-        sandbox.remote = Some(client);
-    }
-
-    match server.wait().await {
-        Ok(_) => {
-            tracing::info!("controller disconnected");
-            Ok(())
-        }
-        Err(error) => {
-            tracing::error!(?error, "RPC failed");
-            Err(crate::current::flavor::syscall::SyscallError::OsError(
-                nix::errno::Errno::EPIPE,
-            ))
-        }
-    }
+    sandbox.run().await
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
@@ -188,20 +175,118 @@ fn init_rootfs<SC: Syscall>(root: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Encode, Decode)]
+pub enum SandboxRequest {
+    IsolateFilesystem,
+    BeginFile(u64, Box<[u8]>),
+    WriteFile(u64, Box<[u8]>),
+    EndFile(u64),
+}
+
 #[derive(Debug)]
-struct SandboxProcess<SC: Syscall> {
+struct PendingFile {
+    send: flume::Sender<Box<[u8]>>,
+    handle: JoinHandle<std::io::Result<()>>,
+}
+
+#[derive(Debug)]
+struct SandboxProcess<SC: Syscall = NixSysCall> {
     rootfs_path: PathBuf,
-    remote: Option<super::proto::ControllerProcessClient>,
+    remote: OverlapPeer,
+    files: Arc<RwLock<HashMap<u64, PendingFile>>>,
     _phantom: PhantomData<SC>,
 }
 
-#[rtc::async_trait]
-impl<SC: Syscall> super::proto::SandboxProcess for SandboxProcess<SC> {
-    async fn isolate_network(&mut self) -> std::result::Result<(), SandboxError> {
+impl<SC: Syscall> SandboxProcess<SC> {
+    async fn run(self) -> Result<()> {
+        loop {
+            let (id, request) = self.remote.next().await?;
+            match request {
+                SandboxRequest::IsolateFilesystem => {
+                    let result = self.isolate_filesystem();
+                    self.remote.respond_result(id, result).await?;
+                }
+                SandboxRequest::BeginFile(file_id, path) => {
+                    let path = Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(&path) });
+                    let result = self.begin_file(file_id, path).await;
+                    self.remote.respond_result(id, result).await?;
+                }
+                SandboxRequest::WriteFile(file_id, data) => {
+                    let result = self.write_file(file_id, data).await;
+                    self.remote.respond_result(id, result).await?;
+                }
+                SandboxRequest::EndFile(file_id) => {
+                    let result = self.end_file(file_id).await;
+                    self.remote.respond_result(id, result).await?;
+                }
+            }
+        }
+    }
+
+    fn isolate_filesystem(&self) -> std::result::Result<(), PeerError> {
+        SC::pivot(self.rootfs_path.as_path())?;
         Ok(())
     }
-    async fn isolate_filesystem(&mut self) -> std::result::Result<(), SandboxError> {
-        SC::pivot(self.rootfs_path.as_path()).map_err(|_| SandboxError::IoError)?;
+
+    async fn begin_file(&self, id: u64, path: &Path) -> std::result::Result<(), PeerError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(false)
+            .truncate(true)
+            .write(true)
+            .open(path)
+            .await?;
+
+        let (send, receive) = flume::bounded::<Box<[u8]>>(16);
+        let handle = tokio::spawn(async move {
+            while let Ok(data) = receive.recv_async().await {
+                file.write_all(&data).await?;
+                tracing::trace!(id, "wrote {} bytes", data.len());
+            }
+            Ok(())
+        });
+
+        let mut files = self.files.write().await;
+        files.insert(id, PendingFile { send, handle });
+        tracing::trace!(id, ?path, "opened");
+
+        Ok(())
+    }
+
+    async fn write_file(&self, id: u64, data: Box<[u8]>) -> std::result::Result<(), PeerError> {
+        let files = self.files.read().await;
+        let file = files
+            .get(&id)
+            .ok_or_else(|| PeerError::Other(format!("file {id:x} has not been started")))?;
+        tracing::trace!(id, "pending write of {} bytes", data.len());
+        if file
+            .send
+            .send_async(data)
+            .await
+            .map_err(|_| std::io::Error::from(ErrorKind::ConnectionAborted))
+            .is_err()
+        {
+            drop(files);
+            return self.end_file(id).await;
+        }
+        Ok(())
+    }
+
+    async fn end_file(&self, id: u64) -> std::result::Result<(), PeerError> {
+        let mut files = self.files.write().await;
+        let file = files
+            .remove(&id)
+            .ok_or_else(|| PeerError::Other(format!("file {id:x} has not been started")))?;
+        drop(file.send);
+        file.handle
+            .await
+            .map_err(|e| std::io::Error::new(ErrorKind::ConnectionAborted, e))
+            .flatten()?;
+        tracing::trace!(id, "closed");
         Ok(())
     }
 }
