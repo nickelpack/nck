@@ -179,6 +179,8 @@ pub trait Syscall: Send + Sync {
     fn remove_file(path: impl AsRef<Path>) -> Result<()>;
     fn set_hostname(hostname: impl AsRef<OsStr>) -> Result<()>;
     fn symlink(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<()>;
+    fn exists(path: impl AsRef<Path>) -> bool;
+    fn exists_in_fs(path: impl AsRef<Path>) -> Result<bool>;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -519,6 +521,18 @@ impl Syscall for NixSysCall {
         symlink(src.as_ref(), dest.as_ref())?;
         Ok(())
     }
+
+    #[inline]
+    #[tracing::instrument(level = "trace", skip_all, fields(path = ?path.as_ref()))]
+    fn exists(path: impl AsRef<Path>) -> bool {
+        path.as_ref().exists()
+    }
+
+    #[inline]
+    #[tracing::instrument(level = "trace", skip_all, fields(path = ?path.as_ref()))]
+    fn exists_in_fs(path: impl AsRef<Path>) -> Result<bool> {
+        Ok(path.as_ref().try_exists()?)
+    }
 }
 
 #[derive(Debug)]
@@ -569,7 +583,7 @@ impl<SC: Syscall> Drop for TempMount<SC> {
     }
 }
 
-pub struct ChildProcess<SC: Syscall> {
+pub struct ChildProcess<SC: Syscall = NixSysCall> {
     pid: Option<Pid>,
     timeout: Duration,
     _phantom: PhantomData<SC>,

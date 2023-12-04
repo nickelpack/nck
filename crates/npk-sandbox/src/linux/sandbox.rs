@@ -1,34 +1,32 @@
 use std::{
     collections::HashMap,
-    ffi::OsStr,
+    fs::Permissions,
     io::ErrorKind,
     marker::PhantomData,
+    os::unix::prelude::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use bitcode::{Decode, Encode};
+use bytes::BytesMut;
+use flume::Receiver;
 use nix::{
     mount::MsFlags,
     sys::{personality::Persona, stat::Mode},
 };
-use npk_util::io::timeout_async;
-use tokio::{
-    fs::{File, OpenOptions},
-    io::AsyncWriteExt,
-    net::UnixStream,
-    sync::{Mutex, RwLock},
-    task::{JoinError, JoinHandle},
-};
+use npk_util::{io::Timeout, pool::PooledItem, transport::AsyncPeer};
+use speedy::{Readable, Writable};
+use tokio::{fs::OpenOptions, io::AsyncWriteExt, net::UnixStream, sync::Mutex, task::JoinHandle};
+use tracing::Instrument;
 
 use super::{
-    proto::{OverlapPeer, PeerError},
-    syscall::{MountType, NixSysCall, Result, Syscall, SYS_NONE},
+    proto::{PeerError, SerOsString},
+    syscall::{MountType, NixSysCall, Result, Syscall, SyscallError, SYS_NONE},
     SOCKET_TIMEOUT,
 };
 
-#[tracing::instrument(level = "trace", skip_all)]
-pub async fn main<SC: Syscall + 'static>(
+#[tracing::instrument(level = "trace", skip_all, err(Debug), parent = None)]
+pub async fn sandbox_main<SC: Syscall + 'static>(
     name: &str,
     socket_path: PathBuf,
     rootfs_path: PathBuf,
@@ -49,15 +47,21 @@ pub async fn main<SC: Syscall + 'static>(
 
     tracing::trace!("connecting to controller");
 
-    let socket = timeout_async(SOCKET_TIMEOUT, UnixStream::connect(socket_path.as_path())).await?;
+    let socket = SOCKET_TIMEOUT
+        .timeout_async(UnixStream::connect(socket_path.as_path()))
+        .await?;
 
     let sandbox = SandboxProcess::<SC> {
         rootfs_path,
-        remote: OverlapPeer::new(socket),
-        files: Arc::new(RwLock::new(HashMap::new())),
+        remote: AsyncPeer::new(socket.into_split()),
+        files: Arc::new(Mutex::new(HashMap::new())),
         _phantom: PhantomData,
     };
-    sandbox.run().await
+    match sandbox.run().in_current_span().await {
+        Ok(_) => Ok(()),
+        Err(SyscallError::IoError(e)) if e.kind() == ErrorKind::ConnectionAborted => Ok(()),
+        other => other,
+    }
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
@@ -175,48 +179,62 @@ fn init_rootfs<SC: Syscall>(root: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Encode, Decode)]
+#[derive(Debug, Readable, Writable)]
 pub enum SandboxRequest {
     IsolateFilesystem,
-    BeginFile(u64, Box<[u8]>),
-    WriteFile(u64, Box<[u8]>),
-    EndFile(u64),
-}
-
-#[derive(Debug)]
-struct PendingFile {
-    send: flume::Sender<Box<[u8]>>,
-    handle: JoinHandle<std::io::Result<()>>,
+    BeginFile(u32, SerOsString, u32),
+    EndFile(u32),
+    MkDir(SerOsString, u32),
+    Link(SerOsString, SerOsString),
+    Exec {
+        path: SerOsString,
+        args: Vec<SerOsString>,
+        env: Vec<(SerOsString, SerOsString)>,
+        dir: SerOsString,
+    },
 }
 
 #[derive(Debug)]
 struct SandboxProcess<SC: Syscall = NixSysCall> {
     rootfs_path: PathBuf,
-    remote: OverlapPeer,
-    files: Arc<RwLock<HashMap<u64, PendingFile>>>,
+    remote: AsyncPeer,
+    files: Arc<Mutex<HashMap<u32, JoinHandle<std::io::Result<()>>>>>,
     _phantom: PhantomData<SC>,
 }
 
 impl<SC: Syscall> SandboxProcess<SC> {
     async fn run(self) -> Result<()> {
         loop {
-            let (id, request) = self.remote.next().await?;
+            let (id, request) = self.remote.next::<SandboxRequest>().await?.into_inner();
             match request {
                 SandboxRequest::IsolateFilesystem => {
                     let result = self.isolate_filesystem();
                     self.remote.respond_result(id, result).await?;
                 }
-                SandboxRequest::BeginFile(file_id, path) => {
-                    let path = Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(&path) });
-                    let result = self.begin_file(file_id, path).await;
-                    self.remote.respond_result(id, result).await?;
-                }
-                SandboxRequest::WriteFile(file_id, data) => {
-                    let result = self.write_file(file_id, data).await;
+                SandboxRequest::BeginFile(file_id, path, mode) => {
+                    let stream = self.remote.read_stream(file_id).await;
+                    let result = self.begin_file(file_id, stream, path.as_ref(), mode).await;
                     self.remote.respond_result(id, result).await?;
                 }
                 SandboxRequest::EndFile(file_id) => {
                     let result = self.end_file(file_id).await;
+                    self.remote.respond_result(id, result).await?;
+                }
+                SandboxRequest::MkDir(path, mode) => {
+                    let result = Self::mk_dir(path.as_ref(), mode).await;
+                    self.remote.respond_result(id, result).await?;
+                }
+                SandboxRequest::Link(from, to) => {
+                    let result = Self::link(from.as_ref(), to.as_ref()).await;
+                    self.remote.respond_result(id, result).await?;
+                }
+                SandboxRequest::Exec {
+                    path,
+                    args,
+                    env,
+                    dir,
+                } => {
+                    let result = Self::exec(path.as_ref(), &args, env, dir.as_ref()).await;
                     self.remote.respond_result(id, result).await?;
                 }
             }
@@ -228,9 +246,49 @@ impl<SC: Syscall> SandboxProcess<SC> {
         Ok(())
     }
 
-    async fn begin_file(&self, id: u64, path: &Path) -> std::result::Result<(), PeerError> {
+    async fn exec(
+        path: &Path,
+        args: &[SerOsString],
+        env: Vec<(SerOsString, SerOsString)>,
+        dir: &Path,
+    ) -> std::result::Result<i32, PeerError> {
+        let mut proc = tokio::process::Command::new(path)
+            .args(args)
+            .env_clear()
+            .envs(env.into_iter())
+            .current_dir(dir)
+            .spawn()
+            .inspect_err(|e| tracing::error!(?e, "err"))?;
+        let exit = proc
+            .wait()
+            .await
+            .inspect_err(|error| tracing::trace!(?error, "error"))?;
+        Ok(exit.code().unwrap_or_default())
+    }
+
+    async fn mk_dir(path: &Path, mode: u32) -> std::result::Result<(), PeerError> {
+        tokio::fs::create_dir_all(path).await?;
+        tokio::fs::set_permissions(path, Permissions::from_mode(mode)).await?;
+        Ok(())
+    }
+
+    async fn link(from: &Path, to: &Path) -> std::result::Result<(), PeerError> {
+        if let Some(parent) = to.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::symlink(from, to).await?;
+        Ok(())
+    }
+
+    async fn begin_file(
+        &self,
+        id: u32,
+        receiver: Receiver<PooledItem<'static, BytesMut>>,
+        path: &Path,
+        mode: u32,
+    ) -> std::result::Result<(), PeerError> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            tokio::fs::create_dir_all(parent).await?;
         }
 
         let mut file = OpenOptions::new()
@@ -241,52 +299,34 @@ impl<SC: Syscall> SandboxProcess<SC> {
             .open(path)
             .await?;
 
-        let (send, receive) = flume::bounded::<Box<[u8]>>(16);
-        let handle = tokio::spawn(async move {
-            while let Ok(data) = receive.recv_async().await {
-                file.write_all(&data).await?;
-                tracing::trace!(id, "wrote {} bytes", data.len());
+        let handle = tokio::spawn(
+            async move {
+                while let Ok(data) = receiver.recv_async().await {
+                    file.write_all(&data).await?;
+                }
+                file.set_permissions(Permissions::from_mode(mode)).await?;
+                Ok(())
             }
-            Ok(())
-        });
+            .in_current_span(),
+        );
 
-        let mut files = self.files.write().await;
-        files.insert(id, PendingFile { send, handle });
-        tracing::trace!(id, ?path, "opened");
+        let mut files = self.files.lock().await;
+        files.insert(id, handle);
 
         Ok(())
     }
 
-    async fn write_file(&self, id: u64, data: Box<[u8]>) -> std::result::Result<(), PeerError> {
-        let files = self.files.read().await;
-        let file = files
-            .get(&id)
-            .ok_or_else(|| PeerError::Other(format!("file {id:x} has not been started")))?;
-        tracing::trace!(id, "pending write of {} bytes", data.len());
-        if file
-            .send
-            .send_async(data)
-            .await
-            .map_err(|_| std::io::Error::from(ErrorKind::ConnectionAborted))
-            .is_err()
-        {
-            drop(files);
-            return self.end_file(id).await;
-        }
-        Ok(())
-    }
-
-    async fn end_file(&self, id: u64) -> std::result::Result<(), PeerError> {
-        let mut files = self.files.write().await;
+    async fn end_file(&self, id: u32) -> std::result::Result<(), PeerError> {
+        let mut files = self.files.lock().await;
         let file = files
             .remove(&id)
             .ok_or_else(|| PeerError::Other(format!("file {id:x} has not been started")))?;
-        drop(file.send);
-        file.handle
-            .await
+        drop(files);
+
+        file.await
             .map_err(|e| std::io::Error::new(ErrorKind::ConnectionAborted, e))
             .flatten()?;
-        tracing::trace!(id, "closed");
+        tracing::trace!(id, "closed file");
         Ok(())
     }
 }

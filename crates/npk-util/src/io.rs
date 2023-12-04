@@ -1,7 +1,6 @@
 use bytes::BytesMut;
-use lockfree_object_pool::LinearObjectPool;
-use once_cell::sync::Lazy;
 use std::{
+    future::Future,
     io::Read,
     ops::Deref,
     path::{Path, PathBuf},
@@ -21,7 +20,9 @@ pub fn copy_to_buffer(
     buffer.resize(start + length, 0u8);
     let mut target = &mut buffer[start..(start + length)];
     while !target.is_empty() {
+        tracing::trace!("waiting {} bytes", target.len());
         let len = reader.read(target)?;
+        tracing::trace!("read {} bytes", len);
         if len == 0 {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
@@ -48,13 +49,47 @@ pub async fn copy_to_buffer_async(
     Ok(())
 }
 
-pub async fn timeout_async<R>(
-    duration: Duration,
-    f: impl std::future::Future<Output = std::io::Result<R>>,
-) -> std::io::Result<R> {
-    tokio::time::timeout(duration, f)
-        .await
-        .unwrap_or_else(|_| Err(std::io::Error::from(std::io::ErrorKind::TimedOut)))
+pub trait Timeout {
+    fn timeout_async<R>(
+        &self,
+        f: impl std::future::Future<Output = std::io::Result<R>>,
+    ) -> impl Future<Output = std::io::Result<R>>;
+
+    fn timeout<R>(&self, f: impl FnMut() -> std::io::Result<R>) -> Result<R, std::io::Error>;
+}
+
+impl Timeout for Duration {
+    async fn timeout_async<R>(
+        &self,
+        f: impl std::future::Future<Output = std::io::Result<R>>,
+    ) -> std::io::Result<R> {
+        tokio::time::timeout(*self, f)
+            .await
+            .unwrap_or_else(|_| Err(std::io::Error::from(std::io::ErrorKind::TimedOut)))
+    }
+
+    fn timeout<R>(&self, mut f: impl FnMut() -> std::io::Result<R>) -> Result<R, std::io::Error> {
+        let timeout = Instant::now() + *self;
+        let mut duration = 1;
+        loop {
+            match f() {
+                Ok(r) => return Ok(r),
+                Err(e) => match e.kind() {
+                    std::io::ErrorKind::WouldBlock => {}
+                    _ => return Err(e),
+                },
+            }
+
+            if Instant::now() > timeout {
+                return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+            }
+
+            std::thread::sleep(Duration::from_millis(duration));
+            if duration < 64 {
+                duration *= 2;
+            }
+        }
+    }
 }
 
 pub async fn wait_for_file_async(path: impl AsRef<Path>) -> std::io::Result<()> {
@@ -67,32 +102,6 @@ pub async fn wait_for_file_async(path: impl AsRef<Path>) -> std::io::Result<()> 
         }
     }
     Ok(())
-}
-
-pub fn timeout<R>(
-    duration: Duration,
-    mut f: impl FnMut() -> std::io::Result<R>,
-) -> Result<R, std::io::Error> {
-    let timeout = Instant::now() + duration;
-    let mut duration = 1;
-    loop {
-        match f() {
-            Ok(r) => return Ok(r),
-            Err(e) => match e.kind() {
-                std::io::ErrorKind::WouldBlock => {}
-                _ => return Err(e),
-            },
-        }
-
-        if Instant::now() > timeout {
-            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
-        }
-
-        std::thread::sleep(Duration::from_millis(duration));
-        if duration < 64 {
-            duration *= 2;
-        }
-    }
 }
 
 pub fn wait_for_file(path: impl AsRef<Path>) -> std::io::Result<()> {
@@ -261,6 +270,3 @@ impl Drop for TempDir {
         self.delete_impl().ok();
     }
 }
-
-pub static BUFFER_POOL: Lazy<LinearObjectPool<BytesMut>> =
-    Lazy::new(|| LinearObjectPool::<BytesMut>::new(Default::default, BytesMut::clear));

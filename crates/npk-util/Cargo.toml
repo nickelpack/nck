@@ -5,9 +5,13 @@ edition = "2021"
 
 [dependencies]
 thiserror.workspace = true
-tokio = {workspace = true, features = []}
+tokio = {workspace = true, features = ["io-util", "time"]}
 rand.workspace = true
 tracing.workspace = true
-lockfree-object-pool.workspace = true
 once_cell.workspace = true
+flume.workspace = true
+crc.workspace = true
+futures-sink.workspace = true
+speedy.workspace = true
+
 bytes = "1"

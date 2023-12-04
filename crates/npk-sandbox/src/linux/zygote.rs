@@ -11,10 +11,14 @@ use nix::{
     sys::stat::Mode,
     unistd::{ForkResult, Gid, Uid},
 };
-use npk_util::io::{timeout, wait_for_file, TempDir};
+use npk_util::{
+    io::{wait_for_file, TempDir, Timeout},
+    transport::SyncPeer,
+};
 pub use proto::*;
+use tracing::Instrument;
 
-use crate::current::proto::Peer;
+use crate::current::proto::PeerError;
 
 use super::{
     syscall::{ChildProcess, Result, Syscall, TempMount},
@@ -37,22 +41,19 @@ pub fn main<SC: Syscall + 'static>(cfg: super::Config) -> Result<()> {
         "waiting for the controller socket to appear on the filesystem"
     );
 
-    timeout(SOCKET_TIMEOUT, || wait_for_file(socket_path.as_path()))?;
+    SOCKET_TIMEOUT.timeout(|| wait_for_file(socket_path.as_path()))?;
 
     tracing::trace!(?socket_path, "connecting to controller");
 
     // TODO: This won't actually time out
-    let mut socket = timeout(SOCKET_TIMEOUT, || {
-        UnixStream::connect(socket_path.as_path())
-    })?;
+    let socket = SOCKET_TIMEOUT.timeout(|| UnixStream::connect(socket_path.as_path()))?;
 
     tracing::info!("connected to controller");
 
-    let mut peer = Peer::new(socket);
+    let mut peer = SyncPeer::new(socket);
     let mut previous_pid = None::<ChildProcess<SC>>;
     loop {
-        tracing::trace!("reading next request from controller");
-        let request = match peer.read() {
+        let request = match peer.next::<Request>() {
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 tracing::info!("controller closed the connection");
                 break Ok(());
@@ -65,6 +66,7 @@ pub fn main<SC: Syscall + 'static>(cfg: super::Config) -> Result<()> {
             pid.into_inner();
         }
 
+        let (id, request) = request.into_inner();
         match request {
             Request::Spawn(request) => {
                 tracing::debug!(?request, "received spawn request");
@@ -75,11 +77,9 @@ pub fn main<SC: Syscall + 'static>(cfg: super::Config) -> Result<()> {
                 tracing::trace!(?pid, ?sandbox_path, ?socket_path, "spawned sandbox process");
 
                 let response = SpawnResponse::new(pid.inner(), sandbox_path, socket_path);
+                peer.respond_result(id, Ok::<_, PeerError>(response))?;
 
-                tracing::trace!("writing response to socket");
-                peer.write(&response)?;
                 sandbox_dir.forget();
-
                 previous_pid = Some(pid);
             }
         }
@@ -168,7 +168,7 @@ pub fn inner_main<SC: Syscall + 'static>(
         Ok(ForkResult::Parent { child }) => super::supervisor::main(req.name(), child, rootfs_dir),
         Ok(ForkResult::Child) => super::result_to_isize_runtime(
             "sandbox",
-            super::sandbox::main::<SC>(req.name(), socket_path, rootfs_dir.forget()),
+            super::sandbox::sandbox_main::<SC>(req.name(), socket_path, rootfs_dir.forget()),
         ),
         Err(error) => {
             tracing::error!(
@@ -196,7 +196,7 @@ fn wait_for_controller<SC: Syscall + 'static>(
         ?socket_path,
         "waiting for the controller socket to appear on the filesystem"
     );
-    timeout(Duration::from_secs(5), || wait_for_file(socket_path))?;
+    Duration::from_secs(5).timeout(|| wait_for_file(socket_path))?;
 
     // The zugote is in charge of newuidmap/newgidmap, so if the controller socket has appeared on the filesystem
     // it means that the mapping has occurred and the result has been received by the controller.

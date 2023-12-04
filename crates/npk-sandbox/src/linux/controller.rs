@@ -1,102 +1,93 @@
-use std::{marker::PhantomData, path::Path, sync::atomic::AtomicU64};
+use std::{ffi::OsStr, path::Path, sync::atomic::AtomicU32};
 
 use nix::unistd::{Gid, Uid};
-use npk_util::io::{timeout_async, TempDir, TempFile};
+use npk_util::{
+    io::{TempDir, TempFile, Timeout},
+    transport::AsyncPeer,
+    BUFFER_POOL,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    net::UnixListener,
+    net::{UnixListener, UnixStream},
 };
+use tracing::{Instrument, Level};
 
 use super::{
-    proto::{OverlapPeer, PeerAsync, PeerError},
+    proto::{PeerError, SerOsString},
     sandbox::SandboxRequest,
-    syscall::{ChildProcess, Result, Syscall},
+    syscall::{ChildProcess, NixSysCall, Result, Syscall},
     zygote::{Request, SpawnRequest, SpawnResponse},
     SOCKET_TIMEOUT,
 };
 
-#[tracing::instrument(name = "controller_main", level = "trace", skip_all)]
-pub async fn main<SC: Syscall, F, R>(
+#[tracing::instrument(name = "controller_main", level = "trace", skip_all, parent = None)]
+pub async fn main<F, R>(
     cfg: super::Config,
-    _child: ChildProcess<SC>,
-    f: impl FnOnce(Controller<SC>) -> F,
+    _child: ChildProcess,
+    f: impl FnOnce(Controller) -> F,
 ) -> Result<R>
 where
     F: std::future::Future<Output = R>,
 {
-    let zygote = {
-        let socket_path = cfg.runtime_dir.join(super::zygote::SOCKET_NAME);
-        if socket_path.exists() {
-            tracing::debug!(?socket_path, "deleting existing socket");
-            if let Err(error) = SC::remove_file(socket_path.as_path()) {
-                tracing::warn!(
-                    ?error,
-                    ?socket_path,
-                    "failed to delete existing socket, attempting to listen anyway"
-                )
-            }
-        }
-
-        let listener = UnixListener::bind(socket_path.as_path())?;
-
-        // Make sure the socket file gets cleaned up
-        let _socket_file = TempFile::from(socket_path.as_path());
-
-        tracing::info!(?socket_path, "listening for zygote");
-        timeout_async(SOCKET_TIMEOUT, listener.accept()).await?
-    };
+    let socket_path = cfg.runtime_dir.join(super::zygote::SOCKET_NAME);
+    let zygote = accept_socket::<NixSysCall>(SOCKET_TIMEOUT, socket_path).await?;
 
     tracing::info!("zygote connected");
     let controller = Controller {
         cfg,
-        zygote: PeerAsync::new(zygote.0),
-        _phantom: PhantomData,
+        peer: AsyncPeer::new(zygote.into_split()),
     };
 
-    Ok(f(controller).await)
+    let span = tracing::span!(Level::TRACE, "external_main");
+    Ok(f(controller).instrument(span).await)
 }
 
-pub struct Controller<SC: Syscall> {
+async fn accept_socket<SC: Syscall>(
+    timeout: impl Timeout,
+    socket_path: impl AsRef<Path>,
+) -> std::io::Result<UnixStream> {
+    let socket_path = socket_path.as_ref();
+    if SC::exists(socket_path) {
+        tracing::debug!(?socket_path, "deleting existing socket");
+        if let Err(error) = SC::remove_file(socket_path) {
+            tracing::warn!(
+                ?error,
+                ?socket_path,
+                "failed to delete existing socket, attempting to listen anyway"
+            )
+        }
+    }
+
+    // Make sure the socket file gets cleaned up
+    let _socket_file = TempFile::from(socket_path);
+    let listener = UnixListener::bind(socket_path)?;
+
+    tracing::info!(?socket_path, "listening");
+    Ok(timeout.timeout_async(listener.accept()).await?.0)
+}
+
+pub struct Controller {
     cfg: super::Config,
-    zygote: PeerAsync,
-    _phantom: PhantomData<SC>,
+    peer: AsyncPeer,
 }
 
-impl<SC: Syscall> Controller<SC> {
+impl Controller {
+    pub fn new(cfg: super::Config, peer: AsyncPeer) -> Self {
+        Self { cfg, peer }
+    }
+
     #[tracing::instrument(level = "trace", skip_all)]
-    pub async fn spawn_sandbox(&mut self) -> std::io::Result<Sandbox<SC>> {
+    pub async fn new_sandbox(&mut self) -> std::result::Result<Sandbox, PeerError> {
         tracing::trace!("requesting new sandbox from zygote");
 
-        self.zygote
-            .write(&Request::Spawn(SpawnRequest::new(
-                "npk-sandbox-01",
-                Uid::from_raw(self.cfg.id_map.uid_min),
-                Gid::from_raw(self.cfg.id_map.gid_min),
-                Uid::from_raw(self.cfg.id_map.uid_min + 1),
-                Gid::from_raw(self.cfg.id_map.gid_min + 1),
-            )))
-            .await?;
+        let ids = self.allocate_ids();
+        let response: SpawnResponse = self
+            .peer
+            .request_result::<SpawnResponse, PeerError, _>(&Request::Spawn(ids))
+            .await??;
 
-        tracing::trace!("request sent");
-
-        let response: SpawnResponse = self.zygote.read().await?;
-
-        tracing::trace!("response received");
-
-        let socket = {
-            let listener = UnixListener::bind(response.socket_path())?;
-
-            tracing::debug!(
-                socket_path = ?response.socket_path(),
-                "waiting for sandbox to connect",
-            );
-
-            let _socket_path = TempFile::from(response.socket_path());
-
-            timeout_async(SOCKET_TIMEOUT, listener.accept()).await?.0
-        };
-
-        let peer = OverlapPeer::new(socket);
+        let socket = accept_socket::<NixSysCall>(SOCKET_TIMEOUT, response.socket_path()).await?;
+        let peer = AsyncPeer::new(socket.into_split());
         Ok(Sandbox {
             peer,
             id: Default::default(),
@@ -104,24 +95,106 @@ impl<SC: Syscall> Controller<SC> {
             _drop_working_dir: TempDir::from(response.sandbox_path()),
         })
     }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    fn allocate_ids(&mut self) -> SpawnRequest {
+        // TODO: These need to be grabbed from a pool
+        SpawnRequest::new(
+            "npk-sandbox-01",
+            Uid::from_raw(self.cfg.id_map.uid_min),
+            Gid::from_raw(self.cfg.id_map.gid_min),
+            Uid::from_raw(self.cfg.id_map.uid_min + 1),
+            Gid::from_raw(self.cfg.id_map.gid_min + 1),
+        )
+    }
 }
 
 #[derive(Debug)]
-pub struct Sandbox<SC: Syscall> {
-    peer: OverlapPeer,
-    id: AtomicU64,
-    _drop_pid: ChildProcess<SC>,
+pub struct Sandbox {
+    peer: AsyncPeer,
+    id: AtomicU32,
+    _drop_pid: ChildProcess,
     _drop_working_dir: TempDir,
 }
 
-impl<SC: Syscall> Sandbox<SC> {
+impl Sandbox {
     #[tracing::instrument(level = "trace", skip_all)]
     pub async fn isolate_filesystem(&self) -> std::result::Result<(), PeerError> {
         self.peer
-            .request_result(&SandboxRequest::IsolateFilesystem)
+            .request_result::<(), PeerError, _>(&SandboxRequest::IsolateFilesystem)
             .await
             .map_err(|_| PeerError::IoError)
             .flatten()
+            .inspect_err(|e| {
+                tracing::error!(?e, "err");
+            })
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn create_dir(
+        &self,
+        path: impl AsRef<Path>,
+        mode: u32,
+    ) -> std::result::Result<(), PeerError> {
+        self.peer
+            .request_result::<(), PeerError, _>(&SandboxRequest::MkDir(path.as_ref().into(), mode))
+            .await
+            .map_err(|_| PeerError::IoError)
+            .flatten()
+            .inspect_err(|e| {
+                tracing::error!(?e, "err");
+            })
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn symlink(
+        &self,
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+    ) -> std::result::Result<(), PeerError> {
+        self.peer
+            .request_result::<(), PeerError, _>(&SandboxRequest::Link(
+                from.as_ref().into(),
+                to.as_ref().into(),
+            ))
+            .await
+            .map_err(|_| PeerError::IoError)
+            .flatten()
+            .inspect_err(|e| {
+                tracing::error!(?e, "err");
+            })
+    }
+
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub async fn exec(
+        &self,
+        path: impl AsRef<Path>,
+        args: impl AsRef<[&OsStr]>,
+        env: impl AsRef<[(&OsStr, &OsStr)]>,
+        dir: impl AsRef<Path>,
+    ) -> std::result::Result<i32, PeerError> {
+        self.peer
+            .request_result::<i32, PeerError, _>(&SandboxRequest::Exec {
+                path: path.as_ref().into(),
+                args: args
+                    .as_ref()
+                    .iter()
+                    .map(|f| Into::<SerOsString>::into(*f))
+                    .collect(),
+                env: env
+                    .as_ref()
+                    .iter()
+                    .map(|(f, v)| (Into::<SerOsString>::into(*f), Into::<SerOsString>::into(*v)))
+                    .collect(),
+                dir: dir.as_ref().into(),
+            })
+            .await
+            .inspect_err(|e| tracing::error!(?e, "err1"))
+            .map_err(|_| PeerError::IoError)
+            .flatten()
+            .inspect_err(|e| {
+                tracing::error!(?e, "err");
+            })
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
@@ -129,27 +202,29 @@ impl<SC: Syscall> Sandbox<SC> {
         &self,
         path: impl AsRef<Path>,
         data: &mut (impl AsyncRead + Unpin),
+        mode: u32,
     ) -> std::result::Result<(), PeerError> {
-        let path: Box<[u8]> = path.as_ref().as_os_str().as_encoded_bytes().into();
         let id = self.id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let writer = self.peer.write_stream(id).await;
         self.peer
-            .request_result::<(), _>(&SandboxRequest::BeginFile(id, path))
+            .request_result::<(), PeerError, SandboxRequest>(&SandboxRequest::BeginFile(
+                id,
+                path.as_ref().into(),
+                mode,
+            ))
             .await??;
-        tracing::trace!("starting");
         let result: std::result::Result<(), PeerError> = async move {
-            // TODO: So many allocations
             loop {
-                let mut buffer = vec![0u8; 4096];
-                buffer.resize(4096, 0u8);
+                let mut buffer = BUFFER_POOL.take();
+                buffer.resize(8192, 0u8);
                 let len = data.read(&mut buffer).await?;
                 if len == 0 {
                     break;
                 }
                 buffer.resize(len, 0u8);
-                let b = buffer.into_boxed_slice();
-                self.peer
-                    .request_result::<(), _>(&SandboxRequest::WriteFile(id, b))
-                    .await??;
+                if writer.send_async(buffer).await.is_err() {
+                    break;
+                }
             }
             Ok(())
         }
@@ -157,10 +232,9 @@ impl<SC: Syscall> Sandbox<SC> {
 
         let end_result = self
             .peer
-            .request_result::<(), _>(&SandboxRequest::EndFile(id))
+            .request_result::<(), _, _>(&SandboxRequest::EndFile(id))
             .await;
 
-        tracing::trace!("done");
         if result.is_err() {
             result
         } else {

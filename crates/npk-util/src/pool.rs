@@ -1,0 +1,409 @@
+//! A capacity-limited object pool
+//!
+//! Provides an object pool that is wait-free. The pool contains a maximum number of objects. If more objects are
+//! returned than the pool can contain, they will be dropped immediately.
+//!
+//! There are no ordering guarantees.
+
+use std::{
+    cell::UnsafeCell,
+    mem::MaybeUninit,
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
+};
+
+const EMPTY: u8 = 0;
+const WRITING: u8 = 1;
+const AVAILABLE: u8 = 2;
+const TAKING: u8 = 3;
+const DESTROYED: u8 = 4;
+
+trait PoolReturn<T>: Sync {
+    fn return_value(&self, value: T);
+}
+
+struct PoolState<'a, T, const CAPACITY: usize> {
+    skip: AtomicUsize,
+    pool: [UnsafeCell<MaybeUninit<T>>; CAPACITY],
+    states: [AtomicU8; CAPACITY],
+    create: &'a dyn Fn() -> T,
+    reset: &'a dyn Fn(T) -> Option<T>,
+}
+
+unsafe impl<'a, T, const CAPACITY: usize> Sync for PoolState<'a, T, CAPACITY> {}
+unsafe impl<'a, T: Send, const CAPACITY: usize> Send for PoolState<'a, T, CAPACITY> {}
+
+/// The actual implementation of the pool.
+///
+/// It is implemented as a array of objects and states. When retrieving a value the reader will attempt to update the
+/// corresponding state from `AVAILABLE` to `TAKING`. If that succeeds it can then take the value and write `EMPTY`.
+/// Likewise, when returning a value the writer will transition from `EMPTY`, to `WRITING`, to `AVAILABLE`. If a the
+/// initial lock fails (`AVAILABLE` to `TAKING`, or `EMPTY` to `WRITING`) it will give up on the cell and immediately
+/// move to the next. Contention is reduced with a global shared counter that is used to determine a wrapping offest
+/// into the array to start at.
+///
+/// This does not read then CAS, so does not suffer from ABA.
+impl<'a, T, const CAPACITY: usize> PoolState<'a, T, CAPACITY> {
+    pub fn take(&self) -> T {
+        let offset = self.skip.fetch_add(1, Ordering::Relaxed);
+        for i in 0..CAPACITY {
+            let i = i.wrapping_add(offset).wrapping_rem(CAPACITY);
+
+            if self.states[i]
+                .compare_exchange(AVAILABLE, TAKING, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err()
+            {
+                continue;
+            }
+
+            let cell = unsafe { &mut *self.pool[i].get() };
+            let val = std::mem::replace(cell, MaybeUninit::uninit());
+            self.states[i]
+                .compare_exchange(TAKING, EMPTY, Ordering::Release, Ordering::Relaxed)
+                .ok();
+            return unsafe { val.assume_init() };
+        }
+        (self.create)()
+    }
+}
+
+impl<'a, T, const CAPACITY: usize> PoolReturn<T> for PoolState<'a, T, CAPACITY> {
+    #[inline]
+    fn return_value(&self, value: T) {
+        let value = if let Some(value) = (self.reset)(value) {
+            value
+        } else {
+            return;
+        };
+
+        let offset = self.skip.fetch_add(1, Ordering::Relaxed);
+        for i in 0..CAPACITY {
+            let i = i.wrapping_add(offset).wrapping_rem(CAPACITY);
+
+            match self.states[i].compare_exchange(
+                EMPTY,
+                WRITING,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {}
+                Err(DESTROYED) => break,
+                _ => continue,
+            }
+
+            let cell = unsafe { &mut *self.pool[i].get() };
+            *cell = MaybeUninit::new(value);
+            self.states[i]
+                .compare_exchange(WRITING, AVAILABLE, Ordering::Release, Ordering::Relaxed)
+                .ok();
+            break;
+        }
+    }
+}
+
+impl<'a, T, const CAPACITY: usize> Drop for PoolState<'a, T, CAPACITY> {
+    fn drop(&mut self) {
+        // Given the mut reference this is probably completely unessecary
+        let mut except = CAPACITY;
+        while except != 0 {
+            except = CAPACITY;
+            for i in 0..CAPACITY {
+                if self.states[i].load(Ordering::Acquire) == DESTROYED {
+                    except -= 1;
+                    continue;
+                }
+
+                match self.states[i].compare_exchange(
+                    EMPTY,
+                    DESTROYED,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) | Err(DESTROYED) => {
+                        except -= 1;
+                        continue;
+                    }
+                    // We have to wait for writing to complete
+                    Err(WRITING) => std::thread::yield_now(),
+                    _ => {}
+                }
+
+                match self.states[i].compare_exchange(
+                    AVAILABLE,
+                    DESTROYED,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        let val = std::mem::replace(self.pool[i].get_mut(), MaybeUninit::uninit());
+                        drop(unsafe { val.assume_init() });
+                        except -= 1;
+                        continue;
+                    }
+                    Err(DESTROYED) => {
+                        except -= 1;
+                        continue;
+                    }
+                    Err(WRITING) | Err(EMPTY) => continue,
+                    _ => {}
+                }
+
+                // We don't need to wait for TAKING to finish because it will be returned at some point
+                match self.states[i].compare_exchange(
+                    TAKING,
+                    DESTROYED,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) | Err(DESTROYED) => except -= 1,
+                    _ => {}
+                }
+            }
+
+            // Allow the threads we are waiting on to proceed
+            std::thread::yield_now();
+        }
+    }
+}
+
+/// A wait-free capacity-limited pool of objects.
+///
+/// * `CAPACITY`: The capacity of the pool.
+/// * `T`: The type of object in the pool.
+///
+/// # Examples
+///
+/// ```
+/// use npk_util::pool::Pool;
+/// static BUFFER_POOL: Pool<16, Vec<u8>> = Pool::new(&|| Vec::new(), &|mut v| {
+///    if v.capacity() <= 4096 {
+///        v.clear();
+///        Some(v)
+///    } else {
+///        None
+///    }
+/// });
+/// let buffer = BUFFER_POOL.take();
+/// // `buffer` will be returned to the pool when dropped.
+/// ```
+pub struct Pool<'a, const CAPACITY: usize, T> {
+    state: PoolState<'a, T, CAPACITY>,
+}
+
+impl<'a, const CAPACITY: usize, T> Pool<'a, CAPACITY, T> {
+    /// Creates a new `Pool`.
+    ///
+    /// # Parameters
+    ///
+    /// * `create`: A factory for `T`.
+    /// * `reset`: Filters values and resets them before they are placed back into the pool.
+    pub const fn new(
+        create: &'a (impl Send + Sync + Fn() -> T),
+        reset: &'a (impl Send + Sync + Fn(T) -> Option<T>),
+    ) -> Self {
+        let state = PoolState {
+            skip: AtomicUsize::new(0),
+            pool: [const { UnsafeCell::new(MaybeUninit::uninit()) }; CAPACITY],
+            states: [const { AtomicU8::new(0) }; CAPACITY],
+            reset,
+            create,
+        };
+        Self { state }
+    }
+
+    /// Gets the value of `CAPACITY`.
+    pub const fn capacity(&self) -> usize {
+        CAPACITY
+    }
+
+    /// Takes or creates a single pooled value.
+    ///
+    /// The returned object will return the value to the pool when dropped.
+    #[inline]
+    pub fn take(&self) -> PooledItem<'_, T> {
+        let result = self.state.take();
+        PooledItem {
+            value: Some(result),
+            return_to_pool: &self.state,
+        }
+    }
+}
+
+/// A value that was retrieved from a `Pool`.
+pub struct PooledItem<'a, T> {
+    value: Option<T>,
+    return_to_pool: &'a dyn PoolReturn<T>,
+}
+
+impl<'a, T> PooledItem<'a, T> {
+    /// Gets a reference to the value.
+    ///
+    /// This will return `None` if the value was forgotten with `forget`.
+    #[inline]
+    pub fn get(&'a self) -> Option<&'a T> {
+        self.value.as_ref()
+    }
+
+    /// Gets a mutable reference to the value.
+    ///
+    /// This will return `None` if the value was forgotten with `forget`.
+    #[inline]
+    pub fn get_mut(&'a mut self) -> Option<&'a mut T> {
+        self.value.as_mut()
+    }
+
+    /// Forgets the contained value
+    ///
+    /// Prevents the contained value from being returned to the pool, and returns it to the caller.
+    pub fn forget(mut self) -> T {
+        self.value.take().unwrap()
+    }
+}
+
+impl<'a, T: std::fmt::Debug> std::fmt::Debug for PooledItem<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.value.as_ref() {
+            Some(v) => f.debug_tuple("PooledItem").field(v).finish(),
+            None => f.debug_tuple("PooledItem").field(&"Empty").finish(),
+        }
+    }
+}
+
+impl<'a, T> Deref for PooledItem<'a, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        self.value.as_ref().unwrap()
+    }
+}
+
+impl<'a, T> DerefMut for PooledItem<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.value.as_mut().unwrap()
+    }
+}
+
+impl<'a, T> AsRef<T> for PooledItem<'a, T> {
+    #[inline]
+    fn as_ref(&self) -> &T {
+        self.value.as_ref().unwrap()
+    }
+}
+
+impl<'a, T> AsMut<T> for PooledItem<'a, T> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut T {
+        self.value.as_mut().unwrap()
+    }
+}
+
+impl<'a, T> Drop for PooledItem<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        if let Some(old) = self.value.take() {
+            self.return_to_pool.return_value(old)
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::{
+        hint::black_box,
+        sync::{
+            atomic::{AtomicBool, AtomicU64},
+            mpsc::channel,
+            Arc,
+        },
+    };
+
+    use crate::pool::{PooledItem, EMPTY};
+
+    use super::{Pool, PoolReturn};
+
+    #[test]
+    pub fn take_return() {
+        let pool = Pool::<16, _>::new(&|| 0u64, &Some);
+        pool.take();
+    }
+
+    static COUNTER_THREADED: AtomicU64 = AtomicU64::new(0);
+    static POOL_THREADED: Pool<16, Box<u64>> = Pool::<16, Box<u64>>::new(
+        &|| Box::new(COUNTER_THREADED.fetch_add(1, std::sync::atomic::Ordering::SeqCst)),
+        &Some,
+    );
+
+    #[test]
+    pub fn threaded() {
+        let (send, receive) = channel::<PooledItem<Box<u64>>>();
+        let running = Arc::new(AtomicBool::new(true));
+
+        let handle = std::thread::spawn(move || {
+            while let Ok(v) = receive.recv() {
+                black_box(v);
+            }
+        });
+
+        for _ in 0..3 {
+            // Need more than one writer
+            let running = running.clone();
+            std::thread::spawn(move || {
+                while running.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::yield_now();
+                    black_box(POOL_THREADED.take());
+                }
+            });
+        }
+
+        std::thread::scope(|s| {
+            for _ in 0..20 {
+                s.spawn(|| {
+                    let send = send.clone();
+                    for _ in 0..100 {
+                        let v = POOL_THREADED.take();
+                        send.send(v).unwrap();
+                    }
+                });
+            }
+        });
+        drop(send);
+        running.store(false, std::sync::atomic::Ordering::Release);
+
+        handle.join().unwrap();
+    }
+
+    #[test]
+    pub fn forget() {
+        let pool = Pool::<16, u64>::new(&|| 0, &Some);
+        black_box(pool.take().forget());
+        for i in 0..pool.capacity() {
+            assert_eq!(
+                EMPTY,
+                pool.state.states[i].load(std::sync::atomic::Ordering::SeqCst)
+            );
+        }
+    }
+
+    #[test]
+    pub fn filter() {
+        let pool = Pool::<16, u64>::new(&|| 0, &|v| {
+            if v.wrapping_rem(2) == 0 {
+                Some(v)
+            } else {
+                None
+            }
+        });
+
+        for i in 0..(pool.capacity() * 2) {
+            pool.state.return_value(i as u64);
+        }
+
+        for _ in 0..pool.capacity() {
+            let v = pool.take();
+            assert!(v.wrapping_rem(2) == 0);
+            v.forget();
+        }
+    }
+}

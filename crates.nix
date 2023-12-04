@@ -9,7 +9,7 @@
       export = true;
       drvConfig = {
         mkDerivation = {
-          buildInputs = with pkgs; [llvmPackages.clangUseLLVM llvmPackages.bintools];
+          buildInputs = with pkgs; [llvmPackages.clangUseLLVM llvmPackages.bintools cargo-nextest];
         };
       };
     };

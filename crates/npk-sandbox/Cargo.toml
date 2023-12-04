@@ -13,11 +13,10 @@ serde = { workspace = true, features = [ "derive"] }
 bitflags = { workspace = true, features = [ "serde" ] }
 config.workspace = true
 flume.workspace = true
-lockfree-object-pool.workspace = true
 once_cell.workspace = true
+crc.workspace = true
+speedy.workspace = true
 
-bitcode = "0.5"
-crc = "3"
 bytes = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]

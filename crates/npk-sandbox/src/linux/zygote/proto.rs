@@ -1,12 +1,14 @@
-use std::{ffi::OsStr, path::Path};
+use std::path::Path;
 
-use bitcode::{Decode, Encode};
 use nix::unistd::{Gid, Pid, Uid};
+use speedy::{Readable, Writable};
+
+use crate::current::proto::SerOsString;
 
 // This protocol is intentionally extremely simple. Something like remoc would need an entire tokio runtime, which
 // defeats the purpose of a zygote: a process that is as small as possible, which can be quickly forked/cloned.
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Readable, Writable)]
 pub enum Request {
     Spawn(SpawnRequest),
 }
@@ -17,7 +19,7 @@ impl From<SpawnRequest> for Request {
     }
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Readable, Writable)]
 pub struct SpawnRequest {
     name: String,
     root_uid: u32,
@@ -58,19 +60,19 @@ impl SpawnRequest {
     }
 }
 
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone, Readable, Writable)]
 pub struct SpawnResponse {
     pid: i32,
-    sandbox_path: Box<[u8]>,
-    socket_path: Box<[u8]>,
+    sandbox_path: SerOsString,
+    socket_path: SerOsString,
 }
 
 impl SpawnResponse {
     pub fn new(pid: Pid, sandbox_path: impl AsRef<Path>, socket_path: impl AsRef<Path>) -> Self {
         Self {
             pid: pid.as_raw(),
-            sandbox_path: sandbox_path.as_ref().as_os_str().as_encoded_bytes().into(),
-            socket_path: socket_path.as_ref().as_os_str().as_encoded_bytes().into(),
+            sandbox_path: sandbox_path.as_ref().into(),
+            socket_path: socket_path.as_ref().into(),
         }
     }
 
@@ -79,10 +81,10 @@ impl SpawnResponse {
     }
 
     pub fn sandbox_path(&self) -> &Path {
-        Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(&self.sandbox_path) })
+        self.sandbox_path.as_ref()
     }
 
     pub fn socket_path(&self) -> &Path {
-        Path::new(unsafe { OsStr::from_encoded_bytes_unchecked(&self.socket_path) })
+        self.socket_path.as_ref()
     }
 }

@@ -12,18 +12,13 @@ use std::{future::Future, time::Duration};
 pub use config::*;
 pub use controller::Sandbox;
 
-use crc::Crc;
 use syscall::{Result, Syscall};
 
 use self::syscall::NixSysCall;
 
-pub type Controller = controller::Controller<NixSysCall>;
+pub type Controller = controller::Controller;
 
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(2);
-const USIZE_SIZE: usize = std::mem::size_of::<usize>();
-const U64_SIZE: usize = std::mem::size_of::<usize>();
-const ZYGOTE_HEADER_SIZE: usize = USIZE_SIZE + U64_SIZE;
-static CRC: Crc<u64> = Crc::<u64>::new(&crc::CRC_64_REDIS);
 
 fn result_to_isize<R, E: std::fmt::Debug>(name: &str, result: std::result::Result<R, E>) -> isize {
     match result {
@@ -33,14 +28,6 @@ fn result_to_isize<R, E: std::fmt::Debug>(name: &str, result: std::result::Resul
             -1
         }
     }
-}
-
-async fn result_to_isize_async<F, R, E>(name: &str, result: F) -> isize
-where
-    F: Future<Output = std::result::Result<R, E>>,
-    E: std::fmt::Debug,
-{
-    result_to_isize(name, result.await)
 }
 
 fn in_runtime<F>(future: F) -> std::io::Result<F::Output>
@@ -80,7 +67,7 @@ where
 #[inline(always)]
 fn main_impl<SC: Syscall + 'static, F, R>(
     cfg: Config,
-    f: impl FnOnce(controller::Controller<SC>) -> F,
+    f: impl FnOnce(controller::Controller) -> F,
 ) -> Result<Option<R>>
 where
     F: std::future::Future<Output = R>,

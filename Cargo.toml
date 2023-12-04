@@ -18,7 +18,9 @@ parking_lot = "0.12"
 bitflags = "2"
 config = "0.13"
 flume = "0.11"
-lockfree-object-pool = "0.1"
+crc = "3"
+futures-sink = "0.3"
+speedy = "0.8"
 
 npk-sandbox = { path = "./crates/npk-sandbox" }
 npk-util = { path = "./crates/npk-util" }
