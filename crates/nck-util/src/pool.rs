@@ -8,9 +8,13 @@
 use std::{
     cell::UnsafeCell,
     mem::MaybeUninit,
-    ops::{Deref, DerefMut},
     sync::atomic::{AtomicU8, AtomicUsize, Ordering},
 };
+
+mod owned_pooled_item;
+mod pooled_item;
+pub use owned_pooled_item::OwnedPoolItem;
+pub use pooled_item::PooledItem;
 
 const EMPTY: u8 = 0;
 const WRITING: u8 = 1;
@@ -18,8 +22,16 @@ const AVAILABLE: u8 = 2;
 const TAKING: u8 = 3;
 const DESTROYED: u8 = 4;
 
-trait PoolReturn<T>: Sync {
+/// The return portion of a pool.
+pub trait PoolReturn<T>: Sync {
+    /// Returns a value to the pool.
     fn return_value(&self, value: T);
+}
+
+impl<T: Send> PoolReturn<T> for flume::Sender<T> {
+    fn return_value(&self, value: T) {
+        self.send(value).ok();
+    }
 }
 
 struct PoolState<'a, T, const CAPACITY: usize> {
@@ -261,87 +273,7 @@ impl<'a, const CAPACITY: usize, T> Pool<'a, CAPACITY, T> {
     #[inline]
     pub fn take(&self) -> PooledItem<'_, T> {
         let result = self.state.take();
-        PooledItem {
-            value: Some(result),
-            return_to_pool: &self.state,
-        }
-    }
-}
-
-/// A value that was retrieved from a `Pool`.
-pub struct PooledItem<'a, T> {
-    value: Option<T>,
-    return_to_pool: &'a dyn PoolReturn<T>,
-}
-
-impl<'a, T> PooledItem<'a, T> {
-    /// Gets a reference to the value.
-    ///
-    #[inline]
-    pub fn get(&'a self) -> &'a T {
-        self.value.as_ref().unwrap()
-    }
-
-    /// Gets a mutable reference to the value.
-    ///
-    #[inline]
-    pub fn get_mut(&'a mut self) -> &'a mut T {
-        self.value.as_mut().unwrap()
-    }
-
-    /// Forgets the contained value
-    ///
-    /// Prevents the contained value from being returned to the pool, and returns it to the caller.
-    pub fn forget(mut self) -> T {
-        self.value.take().unwrap()
-    }
-}
-
-impl<'a, T: std::fmt::Debug> std::fmt::Debug for PooledItem<'a, T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.value.as_ref() {
-            Some(v) => f.debug_tuple("PooledItem").field(v).finish(),
-            None => f.debug_tuple("PooledItem").field(&"Empty").finish(),
-        }
-    }
-}
-
-impl<'a, T> Deref for PooledItem<'a, T> {
-    type Target = T;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.value.as_ref().unwrap()
-    }
-}
-
-impl<'a, T> DerefMut for PooledItem<'a, T> {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.value.as_mut().unwrap()
-    }
-}
-
-impl<'a, T> AsRef<T> for PooledItem<'a, T> {
-    #[inline]
-    fn as_ref(&self) -> &T {
-        self.value.as_ref().unwrap()
-    }
-}
-
-impl<'a, T> AsMut<T> for PooledItem<'a, T> {
-    #[inline]
-    fn as_mut(&mut self) -> &mut T {
-        self.value.as_mut().unwrap()
-    }
-}
-
-impl<'a, T> Drop for PooledItem<'a, T> {
-    #[inline]
-    fn drop(&mut self) {
-        if let Some(old) = self.value.take() {
-            self.return_to_pool.return_value(old)
-        }
+        PooledItem::new(result, &self.state)
     }
 }
 

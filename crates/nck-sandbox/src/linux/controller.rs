@@ -1,24 +1,23 @@
-use std::{
-    ffi::OsStr,
-    ops::DerefMut,
-    path::{Path, PathBuf},
-    sync::atomic::AtomicU32,
-};
+use std::{ffi::OsStr, ops::DerefMut, path::Path, sync::atomic::AtomicU32};
+
+mod id_allocator;
 
 use bytes::BytesMut;
-use nix::unistd::{Gid, Uid};
 use nck_util::{
     io::{TempDir, TempFile, Timeout},
     pool::PooledItem,
     transport::AsyncPeer,
     BUFFER_POOL,
 };
+use nix::unistd::{Gid, Uid};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     net::{UnixListener, UnixStream},
     sync::oneshot,
 };
 use tracing::{Instrument, Level};
+
+use self::id_allocator::{IdAllocator, PooledId};
 
 use super::{
     proto::{PeerError, SerOsString},
@@ -41,10 +40,7 @@ where
     let zygote = accept_socket::<NixSysCall>(SOCKET_TIMEOUT, socket_path).await?;
 
     tracing::info!("zygote connected");
-    let controller = Controller {
-        cfg,
-        peer: AsyncPeer::new(zygote.into_split()),
-    };
+    let controller = Controller::new(cfg, AsyncPeer::new(zygote.into_split()));
 
     let span = tracing::span!(Level::TRACE, "external_main");
     Ok(f(controller).instrument(span).await)
@@ -74,24 +70,48 @@ async fn accept_socket<SC: Syscall>(
     Ok(timeout.timeout_async(listener.accept()).await?.0)
 }
 
+#[derive(Debug, Clone)]
 pub struct Controller {
-    cfg: super::Config,
     peer: AsyncPeer,
+    users: IdAllocator,
+    groups: IdAllocator,
 }
 
 impl Controller {
     pub fn new(cfg: super::Config, peer: AsyncPeer) -> Self {
-        Self { cfg, peer }
+        let users = IdAllocator::new(cfg.id_map.uid_min, cfg.id_map.uid_max);
+        let groups = IdAllocator::new(cfg.id_map.uid_min, cfg.id_map.uid_max);
+        Self {
+            peer,
+            users,
+            groups,
+        }
     }
 
     #[tracing::instrument(level = "trace", skip_all)]
-    pub async fn new_sandbox(&mut self) -> std::result::Result<Sandbox, PeerError> {
-        tracing::trace!("requesting new sandbox from zygote");
+    pub async fn new_sandbox(&mut self, name: &str) -> std::result::Result<Sandbox, PeerError> {
+        let user_uid = self.users.allocate().await;
+        let user_gid = self.groups.allocate().await;
+        let root_uid = self.users.allocate().await;
+        let root_gid = self.groups.allocate().await;
 
-        let ids = self.allocate_ids();
+        tracing::trace!(
+            name,
+            ?user_uid,
+            ?user_gid,
+            ?root_uid,
+            ?root_gid,
+            "requesting new sandbox"
+        );
         let response: SpawnResponse = self
             .peer
-            .request_result::<SpawnResponse, PeerError, _>(&Request::Spawn(ids))
+            .request_result::<SpawnResponse, PeerError, _>(&Request::Spawn(SpawnRequest::new(
+                name,
+                Uid::from_raw(*root_uid.get()),
+                Gid::from_raw(*root_gid.get()),
+                Uid::from_raw(*user_uid.get()),
+                Gid::from_raw(*user_gid.get()),
+            )))
             .await??;
 
         let socket = accept_socket::<NixSysCall>(SOCKET_TIMEOUT, response.socket_path()).await?;
@@ -101,19 +121,8 @@ impl Controller {
             id: Default::default(),
             _drop_pid: response.pid().into(),
             _drop_working_dir: TempDir::from(response.sandbox_path()),
+            _drop_ids: (user_uid, user_gid, root_uid, root_gid),
         })
-    }
-
-    #[tracing::instrument(level = "trace", skip_all)]
-    fn allocate_ids(&mut self) -> SpawnRequest {
-        // TODO: These need to be grabbed from a pool
-        SpawnRequest::new(
-            "nck-sandbox-01",
-            Uid::from_raw(self.cfg.id_map.uid_min),
-            Gid::from_raw(self.cfg.id_map.gid_min),
-            Uid::from_raw(self.cfg.id_map.uid_min + 1),
-            Gid::from_raw(self.cfg.id_map.gid_min + 1),
-        )
     }
 }
 
@@ -123,6 +132,7 @@ pub struct Sandbox {
     id: AtomicU32,
     _drop_pid: ChildProcess,
     _drop_working_dir: TempDir,
+    _drop_ids: (PooledId, PooledId, PooledId, PooledId),
 }
 
 impl Sandbox {

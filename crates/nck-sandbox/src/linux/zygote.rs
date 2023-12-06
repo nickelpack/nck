@@ -8,7 +8,7 @@ use std::{
 
 use nck_util::{
     io::{wait_for_file, TempDir, Timeout},
-    transport::SyncPeer,
+    transport::SyncServer,
 };
 use nix::{
     sched::CloneFlags,
@@ -49,7 +49,7 @@ pub fn main<SC: Syscall + 'static>(cfg: super::Config) -> Result<()> {
 
     tracing::info!("connected to controller");
 
-    let mut peer = SyncPeer::new(socket);
+    let mut peer = SyncServer::new(socket);
     let mut previous_pid = None::<ChildProcess<SC>>;
     loop {
         let request = match peer.next::<Request>() {

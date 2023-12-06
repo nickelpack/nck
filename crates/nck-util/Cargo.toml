@@ -13,5 +13,6 @@ flume.workspace = true
 crc.workspace = true
 futures-sink.workspace = true
 speedy.workspace = true
+dashmap.workspace = true
 
 bytes = "1"

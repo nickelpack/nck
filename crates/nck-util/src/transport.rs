@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     io::{ErrorKind, Write},
     ops::{Deref, DerefMut},
     os::unix::net::UnixStream,
@@ -8,12 +7,13 @@ use std::{
 
 use bytes::{BufMut, BytesMut};
 use crc::{Crc, Digest};
+use dashmap::DashMap;
 use flume::{Receiver, SendError, Sender};
 use speedy::{LittleEndian, Readable, Writable};
 use tokio::{
     io::AsyncWriteExt,
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    sync::{oneshot, Mutex, RwLock},
+    sync::{oneshot, Mutex},
 };
 use tracing::Instrument;
 
@@ -45,7 +45,8 @@ const ID_OFFSET: usize = TYPE_OFFSET + TYPE_SIZE;
 enum PacketType {
     Request,
     Response,
-    Stream,
+    StreamData,
+    StreamEnd,
     StreamError,
 }
 
@@ -54,8 +55,9 @@ impl From<PacketType> for HeaderType {
         match value {
             PacketType::Request => 0,
             PacketType::Response => 1,
-            PacketType::Stream => 2,
-            PacketType::StreamError => 3,
+            PacketType::StreamData => 2,
+            PacketType::StreamEnd => 3,
+            PacketType::StreamError => 4,
         }
     }
 }
@@ -67,17 +69,23 @@ impl TryFrom<HeaderType> for PacketType {
         match value {
             0 => Ok(Self::Request),
             1 => Ok(Self::Response),
-            2 => Ok(Self::Stream),
-            3 => Ok(Self::StreamError),
+            2 => Ok(Self::StreamData),
+            3 => Ok(Self::StreamEnd),
+            4 => Ok(Self::StreamError),
             o => Err(o),
         }
     }
 }
 
-fn write(
+#[inline]
+fn no_write(_: &mut BytesMut) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn write<F: FnOnce(&mut BytesMut) -> std::io::Result<()>>(
     ty: PacketType,
     id: HeaderId,
-    write: impl FnOnce(&mut BytesMut) -> std::io::Result<()>,
+    write: F,
     buffer: &mut BytesMut,
     length_hint: Option<usize>,
 ) -> std::io::Result<()> {
@@ -146,7 +154,6 @@ type OverlapBuffer = PooledItem<'static, BytesMut>;
 
 #[derive(Debug)]
 struct OverlapRequest {
-    key: HeaderId,
     responder: oneshot::Sender<OverlapBuffer>,
 }
 
@@ -167,9 +174,9 @@ enum PeerResult<T, E> {
 #[derive(Debug)]
 struct OverlapPeerState {
     writer: Mutex<OwnedWriteHalf>,
-    streams: RwLock<HashMap<HeaderId, Arc<Sender<OverlapBuffer>>>>,
+    streams: DashMap<HeaderId, Sender<OverlapBuffer>>,
+    requests: DashMap<HeaderId, OverlapRequest>,
     value: AtomicHeaderId,
-    response_sender: flume::Sender<OverlapRequest>,
     request_receiver: flume::Receiver<(HeaderId, OverlapBuffer)>,
 }
 
@@ -244,16 +251,15 @@ pub struct AsyncPeer(Arc<OverlapPeerState>);
 impl AsyncPeer {
     /// Creates a new peer from a Unix socket.
     pub fn new((reader, writer): (OwnedReadHalf, OwnedWriteHalf)) -> Self {
-        let (response_sender, receiver) = flume::unbounded();
         let (sender, request_receiver) = flume::unbounded();
         let state = Arc::new(OverlapPeerState {
             writer: Mutex::new(writer),
-            streams: RwLock::new(HashMap::new()),
+            streams: DashMap::new(),
+            requests: DashMap::new(),
             value: AtomicHeaderId::new(0),
-            response_sender,
             request_receiver,
         });
-        tokio::spawn(Self::worker(state.clone(), reader, receiver, sender).in_current_span());
+        tokio::spawn(Self::worker(state.clone(), reader, sender).in_current_span());
         Self(state)
     }
 
@@ -266,10 +272,9 @@ impl AsyncPeer {
     async fn worker(
         state: Arc<OverlapPeerState>,
         reader: OwnedReadHalf,
-        receiver: flume::Receiver<OverlapRequest>,
         sender: flume::Sender<(HeaderId, OverlapBuffer)>,
     ) {
-        match Self::worker_impl(state, reader, receiver, sender)
+        match Self::worker_impl(state, reader, sender)
             .in_current_span()
             .await
         {
@@ -284,22 +289,9 @@ impl AsyncPeer {
     async fn worker_impl(
         state: Arc<OverlapPeerState>,
         mut reader: OwnedReadHalf,
-        receiver: flume::Receiver<OverlapRequest>,
         sender: flume::Sender<(HeaderId, OverlapBuffer)>,
     ) -> Result<(), std::io::Error> {
-        let mut map = HashMap::<HeaderId, OverlapRequest>::new();
-
         loop {
-            tokio::select! {
-                Ok(v) = receiver.recv_async() => {
-                    Self::register_responses(Some(v), &receiver, &mut map)?;
-                    continue;
-                }
-                Ok(_) = reader.readable() => {},
-                else => break Ok(())
-            }
-
-            tracing::trace!("reading header");
             let mut buffer = BUFFER_POOL.take();
             copy_to_buffer_async(&mut reader, buffer.deref_mut(), HEADER_SIZE)
                 .in_current_span()
@@ -322,8 +314,7 @@ impl AsyncPeer {
             // CRC errors are fatal
             validate_crc(header.crc, crc, &buffer)?;
 
-            Self::register_responses(None, &receiver, &mut map)?;
-            Self::handle_packet(&state, header, buffer, &sender, &mut map).await?;
+            Self::handle_packet(&state, header, buffer, &sender).await?;
         }
     }
 
@@ -333,7 +324,6 @@ impl AsyncPeer {
         header: OverlapHeader,
         buffer: OverlapBuffer,
         sender: &flume::Sender<(HeaderId, OverlapBuffer)>,
-        map: &mut HashMap<HeaderId, OverlapRequest>,
     ) -> std::io::Result<()> {
         match header.ty {
             PacketType::Request => {
@@ -343,7 +333,9 @@ impl AsyncPeer {
                 }
             }
             PacketType::Response => {
-                if let Some(OverlapRequest { responder, .. }) = map.remove(&header.id) {
+                if let Some(OverlapRequest { responder, .. }) =
+                    state.requests.remove(&header.id).map(|(_, v)| v)
+                {
                     if responder.send(buffer).is_err() {
                         tracing::warn!("nothing to handle the response");
                     }
@@ -351,22 +343,17 @@ impl AsyncPeer {
                     tracing::warn!("unknown response");
                 }
             }
-            PacketType::Stream if buffer.len() == 0 => {
-                let mut streams = state.streams.write().await;
-                streams.remove(&header.id);
-                tracing::trace!("stream disconnected");
-            }
-            PacketType::Stream => {
-                if let Some(sender) = state.streams.read().await.get(&header.id).cloned() {
+            PacketType::StreamData => {
+                if let Some(sender) = state.streams.get(&header.id) {
                     if let Err(SendError(mut buffer)) = sender.send_async(buffer).await {
                         tracing::trace!("handler for stream data disconnected");
-                        state.streams.write().await.remove(&header.id);
+                        state.streams.remove(&header.id);
 
                         buffer.clear();
                         write(
                             PacketType::StreamError,
                             header.id,
-                            |_| Ok(()),
+                            no_write,
                             &mut buffer,
                             None,
                         )?;
@@ -376,35 +363,16 @@ impl AsyncPeer {
                     }
                 }
             }
+            PacketType::StreamEnd => {
+                state.streams.remove(&header.id);
+                tracing::trace!("stream disconnected");
+            }
             PacketType::StreamError => {
-                let mut streams = state.streams.write().await;
-                if streams.remove(&header.id).is_some() {
+                if state.streams.remove(&header.id).is_some() {
                     tracing::trace!("stream failed");
                 }
             }
         }
-        Ok(())
-    }
-
-    fn register_responses(
-        mut first: Option<OverlapRequest>,
-        receiver: &flume::Receiver<OverlapRequest>,
-        map: &mut HashMap<HeaderId, OverlapRequest>,
-    ) -> std::io::Result<()> {
-        loop {
-            let value = first.take().map(Ok).unwrap_or_else(|| receiver.try_recv());
-            match value {
-                Ok(request) => {
-                    tracing::trace!(key = request.key, "registering response channel");
-                    map.insert(request.key, request);
-                }
-                Err(flume::TryRecvError::Empty) => break,
-                Err(flume::TryRecvError::Disconnected) => {
-                    return Err(std::io::Error::from(ErrorKind::ConnectionAborted));
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -427,8 +395,7 @@ impl AsyncPeer {
     /// Gets a reader for a stream ID.
     pub async fn read_stream(&self, id: HeaderId) -> Receiver<OverlapBuffer> {
         let (sender, receiver) = flume::bounded(4);
-        let mut streams = self.0.streams.write().await;
-        streams.insert(id, Arc::new(sender));
+        self.0.streams.insert(id, sender);
         receiver
     }
 
@@ -448,7 +415,7 @@ impl AsyncPeer {
                     };
 
                     if write(
-                        PacketType::Stream,
+                        PacketType::StreamData,
                         id,
                         read_buffer,
                         &mut buffer,
@@ -465,9 +432,8 @@ impl AsyncPeer {
                     }
                 }
 
-                // Send stream end
                 let mut buffer = BUFFER_POOL.take();
-                if write(PacketType::Stream, id, |_| Ok(()), &mut buffer, None).is_err() {
+                if write(PacketType::StreamEnd, id, no_write, &mut buffer, None).is_err() {
                     return;
                 }
 
@@ -555,11 +521,7 @@ impl AsyncPeer {
         let key = self.next_id();
         let (responder, receive) = oneshot::channel();
 
-        self.0
-            .response_sender
-            .send_async(OverlapRequest { key, responder })
-            .await
-            .map_err(|_| std::io::Error::from(ErrorKind::ConnectionAborted))?;
+        self.0.requests.insert(key, OverlapRequest { responder });
 
         let mut buffer = BUFFER_POOL.take();
         write(
@@ -591,9 +553,9 @@ impl AsyncPeer {
 
 /// A pared-down version of the peer that can only be used to synchronously service requests.
 #[derive(Debug)]
-pub struct SyncPeer(UnixStream);
+pub struct SyncServer(UnixStream);
 
-impl SyncPeer {
+impl SyncServer {
     pub fn new(socket: UnixStream) -> Self {
         Self(socket)
     }
@@ -651,3 +613,6 @@ impl SyncPeer {
         self.0.write_all(&buffer)
     }
 }
+
+#[cfg(test)]
+mod test {}

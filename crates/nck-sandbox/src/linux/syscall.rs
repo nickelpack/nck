@@ -656,14 +656,12 @@ pub enum InvalidMapping {
 impl Mappings {
     #[inline]
     pub fn push_uid(&mut self, namespace: Uid, parent: Uid) -> &mut Self {
-        self.uids.push((namespace.as_raw(), parent.as_raw(), 1));
-        self
+        self.push_uid_range(namespace, parent, 1).unwrap()
     }
 
     #[inline]
     pub fn push_gid(&mut self, namespace: Gid, parent: Gid) -> &mut Self {
-        self.gids.push((namespace.as_raw(), parent.as_raw(), 1));
-        self
+        self.push_gid_range(namespace, parent, 1).unwrap()
     }
 
     #[inline]

@@ -20,9 +20,7 @@ pub fn copy_to_buffer(
     buffer.resize(start + length, 0u8);
     let mut target = &mut buffer[start..(start + length)];
     while !target.is_empty() {
-        tracing::trace!("waiting {} bytes", target.len());
         let len = reader.read(target)?;
-        tracing::trace!("read {} bytes", len);
         if len == 0 {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }

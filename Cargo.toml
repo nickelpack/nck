@@ -21,6 +21,7 @@ flume = "0.11"
 crc = "3"
 futures-sink = "0.3"
 speedy = "0.8"
+dashmap = "5"
 
 nck-sandbox = { path = "./crates/nck-sandbox" }
 nck-util = { path = "./crates/nck-util" }

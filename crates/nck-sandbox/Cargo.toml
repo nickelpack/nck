@@ -16,6 +16,7 @@ flume.workspace = true
 once_cell.workspace = true
 crc.workspace = true
 speedy.workspace = true
+parking_lot.workspace = true
 
 bytes = "1"
 

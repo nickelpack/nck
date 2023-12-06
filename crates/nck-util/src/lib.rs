@@ -1,6 +1,7 @@
 #![feature(inline_const)]
 #![feature(thread_id_value)]
 
+pub mod base32;
 pub mod io;
 pub mod pool;
 pub mod transport;
@@ -13,7 +14,7 @@ use pool::Pool;
 const MB: usize = 131072;
 const MAX_TOTAL_BUFFERS: usize = 128 * MB;
 const MAX_SINGLE_BUFFER: usize = 16 * MB;
-const DEFAULT_BUFFER_LEN: usize = 4096;
+const DEFAULT_BUFFER_LEN: usize = 16384;
 
 static CURRENT_SIZE: AtomicUsize = AtomicUsize::new(0);
 pub static BUFFER_POOL: Pool<'static, 128, BytesMut> =
