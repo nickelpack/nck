@@ -202,31 +202,31 @@ struct SandboxProcess<SC: Syscall = NixSysCall> {
     _phantom: PhantomData<SC>,
 }
 
-impl<SC: Syscall> SandboxProcess<SC> {
+impl<SC: Syscall + 'static> SandboxProcess<SC> {
     async fn run(self) -> Result<()> {
         loop {
             let (id, request) = self.remote.next::<SandboxRequest>().await?.into_inner();
             match request {
                 SandboxRequest::IsolateFilesystem => {
                     let result = self.isolate_filesystem();
-                    self.remote.respond_result(id, result).await?;
+                    self.remote.respond_result(id, result).await.ok();
                 }
                 SandboxRequest::BeginFile(file_id, path, mode) => {
                     let stream = self.remote.read_stream(file_id).await;
                     let result = self.begin_file(file_id, stream, path.as_ref(), mode).await;
-                    self.remote.respond_result(id, result).await?;
+                    self.remote.respond_result(id, result).await.ok();
                 }
                 SandboxRequest::EndFile(file_id) => {
                     let result = self.end_file(file_id).await;
-                    self.remote.respond_result(id, result).await?;
+                    self.remote.respond_result(id, result).await.ok();
                 }
                 SandboxRequest::MkDir(path, mode) => {
                     let result = Self::mk_dir(path.as_ref(), mode).await;
-                    self.remote.respond_result(id, result).await?;
+                    self.remote.respond_result(id, result).await.ok();
                 }
                 SandboxRequest::Link(from, to) => {
                     let result = Self::link(from.as_ref(), to.as_ref()).await;
-                    self.remote.respond_result(id, result).await?;
+                    self.remote.respond_result(id, result).await.ok();
                 }
                 SandboxRequest::Exec {
                     path,
@@ -235,7 +235,7 @@ impl<SC: Syscall> SandboxProcess<SC> {
                     dir,
                 } => {
                     let result = Self::exec(path.as_ref(), &args, env, dir.as_ref()).await;
-                    self.remote.respond_result(id, result).await?;
+                    self.remote.respond_result(id, result).await.ok();
                 }
             }
         }
@@ -326,7 +326,7 @@ impl<SC: Syscall> SandboxProcess<SC> {
         file.await
             .map_err(|e| std::io::Error::new(ErrorKind::ConnectionAborted, e))
             .flatten()?;
-        tracing::trace!(id, "closed file");
+        // tracing::trace!(id, "closed file");
         Ok(())
     }
 }

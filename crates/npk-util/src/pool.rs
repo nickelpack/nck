@@ -27,7 +27,9 @@ struct PoolState<'a, T, const CAPACITY: usize> {
     pool: [UnsafeCell<MaybeUninit<T>>; CAPACITY],
     states: [AtomicU8; CAPACITY],
     create: &'a dyn Fn() -> T,
-    reset: &'a dyn Fn(T) -> Option<T>,
+    return_hook: Option<&'a dyn Fn(T) -> Option<T>>,
+    take_hook: Option<&'a dyn Fn(T) -> T>,
+    max_loop: usize,
 }
 
 unsafe impl<'a, T, const CAPACITY: usize> Sync for PoolState<'a, T, CAPACITY> {}
@@ -44,10 +46,15 @@ unsafe impl<'a, T: Send, const CAPACITY: usize> Send for PoolState<'a, T, CAPACI
 ///
 /// This does not read then CAS, so does not suffer from ABA.
 impl<'a, T, const CAPACITY: usize> PoolState<'a, T, CAPACITY> {
+    fn next_id(&self) -> usize {
+        let id = std::thread::current().id().as_u64().get() as usize;
+        self.skip.fetch_add(id, Ordering::Relaxed)
+    }
+
     pub fn take(&self) -> T {
-        let offset = self.skip.fetch_add(1, Ordering::Relaxed);
-        for i in 0..CAPACITY {
-            let i = i.wrapping_add(offset).wrapping_rem(CAPACITY);
+        let id = self.next_id();
+        for i in 0..self.max_loop {
+            let i = i.wrapping_add(id).wrapping_rem(CAPACITY);
 
             if self.states[i]
                 .compare_exchange(AVAILABLE, TAKING, Ordering::AcqRel, Ordering::Relaxed)
@@ -61,7 +68,12 @@ impl<'a, T, const CAPACITY: usize> PoolState<'a, T, CAPACITY> {
             self.states[i]
                 .compare_exchange(TAKING, EMPTY, Ordering::Release, Ordering::Relaxed)
                 .ok();
-            return unsafe { val.assume_init() };
+            let result = unsafe { val.assume_init() };
+            return if let Some(hook) = self.take_hook {
+                hook(result)
+            } else {
+                result
+            };
         }
         (self.create)()
     }
@@ -70,15 +82,19 @@ impl<'a, T, const CAPACITY: usize> PoolState<'a, T, CAPACITY> {
 impl<'a, T, const CAPACITY: usize> PoolReturn<T> for PoolState<'a, T, CAPACITY> {
     #[inline]
     fn return_value(&self, value: T) {
-        let value = if let Some(value) = (self.reset)(value) {
-            value
+        let value = if let Some(hook) = self.return_hook {
+            if let Some(value) = hook(value) {
+                value
+            } else {
+                return;
+            }
         } else {
-            return;
+            value
         };
 
-        let offset = self.skip.fetch_add(1, Ordering::Relaxed);
-        for i in 0..CAPACITY {
-            let i = i.wrapping_add(offset).wrapping_rem(CAPACITY);
+        let id = self.next_id();
+        for i in 0..self.max_loop {
+            let i = i.wrapping_add(id).wrapping_rem(CAPACITY);
 
             match self.states[i].compare_exchange(
                 EMPTY,
@@ -175,7 +191,7 @@ impl<'a, T, const CAPACITY: usize> Drop for PoolState<'a, T, CAPACITY> {
 ///
 /// ```
 /// use npk_util::pool::Pool;
-/// static BUFFER_POOL: Pool<16, Vec<u8>> = Pool::new(&|| Vec::new(), &|mut v| {
+/// static BUFFER_POOL: Pool<16, Vec<u8>> = Pool::new(&|| Vec::new()).with_return_hook(&|mut v| {
 ///    if v.capacity() <= 4096 {
 ///        v.clear();
 ///        Some(v)
@@ -196,19 +212,42 @@ impl<'a, const CAPACITY: usize, T> Pool<'a, CAPACITY, T> {
     /// # Parameters
     ///
     /// * `create`: A factory for `T`.
-    /// * `reset`: Filters values and resets them before they are placed back into the pool.
-    pub const fn new(
-        create: &'a (impl Send + Sync + Fn() -> T),
-        reset: &'a (impl Send + Sync + Fn(T) -> Option<T>),
-    ) -> Self {
+    pub const fn new(create: &'a (impl Send + Sync + Fn() -> T)) -> Self {
         let state = PoolState {
             skip: AtomicUsize::new(0),
             pool: [const { UnsafeCell::new(MaybeUninit::uninit()) }; CAPACITY],
             states: [const { AtomicU8::new(0) }; CAPACITY],
-            reset,
             create,
+            return_hook: None,
+            take_hook: None,
+            max_loop: CAPACITY,
         };
         Self { state }
+    }
+
+    /// Sets a hook that can filter and mutate values as they are being returned to the pool.
+    pub const fn with_return_hook(mut self, return_hook: &'a impl Fn(T) -> Option<T>) -> Self {
+        self.state.return_hook = Some(return_hook);
+        self
+    }
+
+    /// Sets a hook that can mutate values when they are taken from the pool.
+    ///
+    /// This hook will not run when a value is created, only when an value is found in the pool and is returned.
+    pub const fn with_take_hook(mut self, take_hook: &'a impl Fn(T) -> T) -> Self {
+        self.state.take_hook = Some(take_hook);
+        self
+    }
+
+    /// Sets the maximum amount of times a free slot should be searched for.
+    pub const fn with_max_search(mut self, max_loop: usize) -> Self {
+        // min is not const
+        if max_loop <= CAPACITY {
+            self.state.max_loop = max_loop;
+        } else {
+            self.state.max_loop = CAPACITY;
+        }
+        self
     }
 
     /// Gets the value of `CAPACITY`.
@@ -238,18 +277,16 @@ pub struct PooledItem<'a, T> {
 impl<'a, T> PooledItem<'a, T> {
     /// Gets a reference to the value.
     ///
-    /// This will return `None` if the value was forgotten with `forget`.
     #[inline]
-    pub fn get(&'a self) -> Option<&'a T> {
-        self.value.as_ref()
+    pub fn get(&'a self) -> &'a T {
+        self.value.as_ref().unwrap()
     }
 
     /// Gets a mutable reference to the value.
     ///
-    /// This will return `None` if the value was forgotten with `forget`.
     #[inline]
-    pub fn get_mut(&'a mut self) -> Option<&'a mut T> {
-        self.value.as_mut()
+    pub fn get_mut(&'a mut self) -> &'a mut T {
+        self.value.as_mut().unwrap()
     }
 
     /// Forgets the contained value
@@ -325,15 +362,14 @@ mod test {
 
     #[test]
     pub fn take_return() {
-        let pool = Pool::<16, _>::new(&|| 0u64, &Some);
+        let pool = Pool::<16, _>::new(&|| 0u64);
         pool.take();
     }
 
     static COUNTER_THREADED: AtomicU64 = AtomicU64::new(0);
-    static POOL_THREADED: Pool<16, Box<u64>> = Pool::<16, Box<u64>>::new(
-        &|| Box::new(COUNTER_THREADED.fetch_add(1, std::sync::atomic::Ordering::SeqCst)),
-        &Some,
-    );
+    static POOL_THREADED: Pool<16, Box<u64>> = Pool::<16, Box<u64>>::new(&|| {
+        Box::new(COUNTER_THREADED.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+    });
 
     #[test]
     pub fn threaded() {
@@ -376,7 +412,7 @@ mod test {
 
     #[test]
     pub fn forget() {
-        let pool = Pool::<16, u64>::new(&|| 0, &Some);
+        let pool = Pool::<16, u64>::new(&|| 0);
         black_box(pool.take().forget());
         for i in 0..pool.capacity() {
             assert_eq!(
@@ -387,8 +423,8 @@ mod test {
     }
 
     #[test]
-    pub fn filter() {
-        let pool = Pool::<16, u64>::new(&|| 0, &|v| {
+    pub fn return_hook() {
+        let pool = Pool::<16, u64>::new(&|| 0).with_return_hook(&|v| {
             if v.wrapping_rem(2) == 0 {
                 Some(v)
             } else {
@@ -404,6 +440,27 @@ mod test {
             let v = pool.take();
             assert!(v.wrapping_rem(2) == 0);
             v.forget();
+        }
+    }
+
+    #[test]
+    pub fn take_hook() {
+        static COUNTER: AtomicU64 = AtomicU64::new(1);
+        let pool = Pool::<16, u64>::new(&|| 0)
+            .with_take_hook(&|_| COUNTER.fetch_add(1, std::sync::atomic::Ordering::AcqRel));
+
+        for _ in 0..(pool.capacity() * 2) {
+            pool.state.return_value(0);
+        }
+
+        for _ in 0..pool.capacity() {
+            let v = pool.take();
+            assert_ne!(v.forget(), 0);
+        }
+
+        for _ in 0..pool.capacity() {
+            let v = pool.take();
+            assert_eq!(0, v.forget());
         }
     }
 }

@@ -42,4 +42,8 @@ sequenceDiagram
     Sandbox->>-Supervisor: cleanup
 ```
 
+# Sandbox
+
+The sandbox protocol is also pretty hardcoded. Turns out the fancy RPC crates really inflate build times.
+
 [1]: https://chromium.googlesource.com/chromium/src/+/HEAD/docs/linux/zygote.md

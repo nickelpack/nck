@@ -8,14 +8,14 @@ use std::{
 
 use bytes::{BufMut, BytesMut};
 use crc::{Crc, Digest};
-use flume::{Receiver, Sender};
+use flume::{Receiver, SendError, Sender};
 use speedy::{LittleEndian, Readable, Writable};
 use tokio::{
     io::AsyncWriteExt,
     net::unix::{OwnedReadHalf, OwnedWriteHalf},
-    sync::{Mutex, RwLock},
+    sync::{oneshot, Mutex, RwLock},
 };
-use tracing::{Instrument, Span};
+use tracing::Instrument;
 
 use crate::{
     io::{copy_to_buffer, copy_to_buffer_async},
@@ -24,7 +24,7 @@ use crate::{
 };
 
 type HeaderCrc = u64;
-type HeaderLength = u16;
+type HeaderLength = u32;
 type HeaderType = u8;
 type HeaderId = u32;
 type AtomicHeaderId = AtomicU32;
@@ -46,6 +46,7 @@ enum PacketType {
     Request,
     Response,
     Stream,
+    StreamError,
 }
 
 impl From<PacketType> for HeaderType {
@@ -54,6 +55,7 @@ impl From<PacketType> for HeaderType {
             PacketType::Request => 0,
             PacketType::Response => 1,
             PacketType::Stream => 2,
+            PacketType::StreamError => 3,
         }
     }
 }
@@ -66,6 +68,7 @@ impl TryFrom<HeaderType> for PacketType {
             0 => Ok(Self::Request),
             1 => Ok(Self::Response),
             2 => Ok(Self::Stream),
+            3 => Ok(Self::StreamError),
             o => Err(o),
         }
     }
@@ -97,23 +100,30 @@ fn write(
     Ok(())
 }
 
-fn parse_header(
-    buffer: &BytesMut,
-) -> (
-    HeaderLength,
-    HeaderType,
-    HeaderId,
-    HeaderCrc,
-    Digest<'static, u64>,
-) {
-    let len =
-        HeaderLength::from_le_bytes(buffer[LENGTH_OFFSET..][..LENGTH_SIZE].try_into().unwrap());
+fn parse_header(buffer: &BytesMut) -> std::io::Result<(OverlapHeader, Digest<'static, u64>)> {
+    let length =
+        HeaderLength::from_le_bytes(buffer[LENGTH_OFFSET..][..LENGTH_SIZE].try_into().unwrap())
+            as usize;
     let ty = HeaderType::from_le_bytes(buffer[TYPE_OFFSET..][..TYPE_SIZE].try_into().unwrap());
     let id = HeaderId::from_le_bytes(buffer[ID_OFFSET..][..ID_SIZE].try_into().unwrap());
     let read_crc = HeaderCrc::from_le_bytes(buffer[CRC_OFFSET..][..CRC_SIZE].try_into().unwrap());
+
+    let ty = ty.try_into().map_err(|e| {
+        tracing::error!("invalid packet type {:x}", e);
+        std::io::Error::from(ErrorKind::InvalidData)
+    })?;
+
     let mut crc = CRC.digest();
     crc.update(&buffer[LENGTH_OFFSET..HEADER_SIZE]);
-    (len, ty, id, read_crc, crc)
+    Ok((
+        OverlapHeader {
+            length,
+            ty,
+            id,
+            crc: read_crc,
+        },
+        crc,
+    ))
 }
 
 fn validate_crc(
@@ -133,9 +143,22 @@ fn validate_crc(
 }
 
 type OverlapBuffer = PooledItem<'static, BytesMut>;
-type OverlapRequest = (HeaderId, Span, flume::Sender<OverlapBuffer>);
 
-#[derive(Readable, Writable)]
+#[derive(Debug)]
+struct OverlapRequest {
+    key: HeaderId,
+    responder: oneshot::Sender<OverlapBuffer>,
+}
+
+#[derive(Debug)]
+struct OverlapHeader {
+    id: HeaderId,
+    ty: PacketType,
+    length: usize,
+    crc: HeaderCrc,
+}
+
+#[derive(Debug, Readable, Writable)]
 enum PeerResult<T, E> {
     Ok(T),
     Err(E),
@@ -221,8 +244,8 @@ pub struct AsyncPeer(Arc<OverlapPeerState>);
 impl AsyncPeer {
     /// Creates a new peer from a Unix socket.
     pub fn new((reader, writer): (OwnedReadHalf, OwnedWriteHalf)) -> Self {
-        let (response_sender, receiver) = flume::bounded(2);
-        let (sender, request_receiver) = flume::bounded(2);
+        let (response_sender, receiver) = flume::unbounded();
+        let (sender, request_receiver) = flume::unbounded();
         let state = Arc::new(OverlapPeerState {
             writer: Mutex::new(writer),
             streams: RwLock::new(HashMap::new()),
@@ -264,11 +287,9 @@ impl AsyncPeer {
         receiver: flume::Receiver<OverlapRequest>,
         sender: flume::Sender<(HeaderId, OverlapBuffer)>,
     ) -> Result<(), std::io::Error> {
-        let mut map = HashMap::<HeaderId, (Span, flume::Sender<OverlapBuffer>)>::new();
+        let mut map = HashMap::<HeaderId, OverlapRequest>::new();
 
         loop {
-            let mut buffer = BUFFER_POOL.take();
-
             tokio::select! {
                 Ok(v) = receiver.recv_async() => {
                     Self::register_responses(Some(v), &receiver, &mut map)?;
@@ -279,6 +300,7 @@ impl AsyncPeer {
             }
 
             tracing::trace!("reading header");
+            let mut buffer = BUFFER_POOL.take();
             copy_to_buffer_async(&mut reader, buffer.deref_mut(), HEADER_SIZE)
                 .in_current_span()
                 .await
@@ -288,75 +310,93 @@ impl AsyncPeer {
                     _ => e,
                 })?;
 
-            let (len, ty, key, read_crc, crc) = parse_header(&buffer);
-            let ty = ty.try_into().map_err(|e| {
-                tracing::error!("invalid packet type {:x}", e);
-                std::io::Error::from(ErrorKind::InvalidData)
-            })?;
+            let (header, crc) = parse_header(&buffer)?;
 
-            tracing::trace!(key, ?ty, len, "received header");
+            tracing::trace!(?header, "received header");
 
             buffer.clear();
-            copy_to_buffer_async(&mut reader, buffer.deref_mut(), len as usize)
+            copy_to_buffer_async(&mut reader, buffer.deref_mut(), header.length)
                 .in_current_span()
                 .await?;
 
             // CRC errors are fatal
-            validate_crc(read_crc, crc, &buffer)?;
+            validate_crc(header.crc, crc, &buffer)?;
 
             Self::register_responses(None, &receiver, &mut map)?;
-            match ty {
-                PacketType::Response => {
-                    if let Some((_, (span, responder))) = map.remove_entry(&key) {
-                        let _ = span.entered();
-                        if responder.send_async(buffer).await.is_err() {
-                            tracing::warn!(key, "nothing to handle the response");
-                        }
-                    } else {
-                        tracing::warn!(key, "unknown response");
-                    }
+            Self::handle_packet(&state, header, buffer, &sender, &mut map).await?;
+        }
+    }
+
+    #[tracing::instrument(level = "trace", skip_all, fields(r#type = ?header.ty, packet_id = header.id))]
+    async fn handle_packet(
+        state: &OverlapPeerState,
+        header: OverlapHeader,
+        buffer: OverlapBuffer,
+        sender: &flume::Sender<(HeaderId, OverlapBuffer)>,
+        map: &mut HashMap<HeaderId, OverlapRequest>,
+    ) -> std::io::Result<()> {
+        match header.ty {
+            PacketType::Request => {
+                if sender.send_async((header.id, buffer)).await.is_err() {
+                    tracing::trace!("remote peer disconnected");
+                    return Ok(());
                 }
-                PacketType::Stream => {
-                    if buffer.len() == 0 {
-                        tracing::trace!(key, "end of stream");
-                        let mut streams = state.streams.write().await;
-                        streams.remove(&key);
-                    } else {
-                        let streams = state.streams.read().await;
-                        if let Some(sender) = streams.get(&key) {
-                            let sender = sender.clone();
-                            drop(streams);
-                            if sender.send_async(buffer).await.is_err() {
-                                tracing::trace!(key, "nothing to handle stream data");
-                                let mut streams = state.streams.write().await;
-                                streams.remove(&key);
-                            }
-                        }
+            }
+            PacketType::Response => {
+                if let Some(OverlapRequest { responder, .. }) = map.remove(&header.id) {
+                    if responder.send(buffer).is_err() {
+                        tracing::warn!("nothing to handle the response");
                     }
+                } else {
+                    tracing::warn!("unknown response");
                 }
-                PacketType::Request => {
-                    tracing::trace!(key, "got request");
-                    if sender.send_async((key, buffer)).await.is_err() {
-                        tracing::trace!(key, "disconnecting");
-                        return Ok(());
+            }
+            PacketType::Stream if buffer.len() == 0 => {
+                let mut streams = state.streams.write().await;
+                streams.remove(&header.id);
+                tracing::trace!("stream disconnected");
+            }
+            PacketType::Stream => {
+                if let Some(sender) = state.streams.read().await.get(&header.id).cloned() {
+                    if let Err(SendError(mut buffer)) = sender.send_async(buffer).await {
+                        tracing::trace!("handler for stream data disconnected");
+                        state.streams.write().await.remove(&header.id);
+
+                        buffer.clear();
+                        write(
+                            PacketType::StreamError,
+                            header.id,
+                            |_| Ok(()),
+                            &mut buffer,
+                            None,
+                        )?;
+
+                        let mut writer = state.writer.lock().await;
+                        writer.write_all_buf(buffer.deref_mut()).await?;
                     }
                 }
             }
+            PacketType::StreamError => {
+                let mut streams = state.streams.write().await;
+                if streams.remove(&header.id).is_some() {
+                    tracing::trace!("stream failed");
+                }
+            }
         }
+        Ok(())
     }
 
     fn register_responses(
         mut first: Option<OverlapRequest>,
         receiver: &flume::Receiver<OverlapRequest>,
-        map: &mut HashMap<HeaderId, (Span, flume::Sender<OverlapBuffer>)>,
+        map: &mut HashMap<HeaderId, OverlapRequest>,
     ) -> std::io::Result<()> {
         loop {
             let value = first.take().map(Ok).unwrap_or_else(|| receiver.try_recv());
             match value {
-                Ok((key, span, responder)) => {
-                    let _ = span.enter();
-                    tracing::trace!(key, "registering response channel");
-                    map.insert(key, (span, responder));
+                Ok(request) => {
+                    tracing::trace!(key = request.key, "registering response channel");
+                    map.insert(request.key, request);
                 }
                 Err(flume::TryRecvError::Empty) => break,
                 Err(flume::TryRecvError::Disconnected) => {
@@ -379,7 +419,7 @@ impl AsyncPeer {
             .await
             .map_err(|_| std::io::Error::from(ErrorKind::ConnectionAborted))?;
 
-        T::read_from_buffer_copying_data(data.get().unwrap())
+        T::read_from_buffer_copying_data(data.get())
             .map(|value| OverlapPacket(OverlapToken(id), value))
             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))
     }
@@ -512,39 +552,39 @@ impl AsyncPeer {
         &self,
         value: &S,
     ) -> std::io::Result<R> {
-        let id = self.next_id();
-        let (send, receive) = flume::bounded(1);
+        let key = self.next_id();
+        let (responder, receive) = oneshot::channel();
 
         self.0
             .response_sender
-            .send_async((id, Span::current(), send))
+            .send_async(OverlapRequest { key, responder })
             .await
             .map_err(|_| std::io::Error::from(ErrorKind::ConnectionAborted))?;
 
-        {
-            let mut buffer = BUFFER_POOL.take();
-            write(
-                PacketType::Request,
-                id,
-                |buffer| {
-                    value
-                        .write_to_stream(buffer.writer())
-                        .map_err(|e| std::io::Error::new(ErrorKind::Other, e))
-                },
-                &mut buffer,
-                None,
-            )?;
+        let mut buffer = BUFFER_POOL.take();
+        write(
+            PacketType::Request,
+            key,
+            |buffer| {
+                value
+                    .write_to_stream(buffer.writer())
+                    .map_err(|e| std::io::Error::new(ErrorKind::Other, e))
+            },
+            &mut buffer,
+            None,
+        )?;
 
-            let mut writer = self.0.writer.lock().await;
-            writer.write_all_buf(buffer.deref_mut()).await?;
-        }
+        let mut writer = self.0.writer.lock().await;
+        writer.write_all_buf(buffer.deref_mut()).await?;
+        drop(writer);
+        drop(buffer);
 
+        tracing::trace!(key, "waiting for response");
         let data = receive
-            .recv_async()
             .await
             .map_err(|_| std::io::Error::from(ErrorKind::ConnectionAborted))?;
 
-        R::read_from_buffer_copying_data(data.get().unwrap())
+        R::read_from_buffer_copying_data(data.get())
             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))
     }
 }
@@ -563,21 +603,17 @@ impl SyncPeer {
         let mut buffer = BUFFER_POOL.take();
 
         copy_to_buffer(&mut self.0, &mut buffer, HEADER_SIZE)?;
-        let (length, ty, result_id, read_crc, crc) = parse_header(&buffer);
-        let ty: PacketType = ty.try_into().map_err(|e| {
-            tracing::error!("invalid packet type {:x}", e);
-            std::io::Error::from(ErrorKind::InvalidData)
-        })?;
+        let (header, crc) = parse_header(&buffer)?;
 
-        assert_eq!(ty, PacketType::Request);
+        assert_eq!(header.ty, PacketType::Request);
 
         buffer.clear();
-        copy_to_buffer(&mut self.0, &mut buffer, length as usize)?;
-        validate_crc(read_crc, crc, &buffer)?;
+        copy_to_buffer(&mut self.0, &mut buffer, header.length)?;
+        validate_crc(header.crc, crc, &buffer)?;
 
         let v = R::read_from_buffer_copying_data(&buffer)
             .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-        Ok(OverlapPacket(OverlapToken(result_id), v))
+        Ok(OverlapPacket(OverlapToken(header.id), v))
     }
 
     /// Responds to a request with a `Result`.

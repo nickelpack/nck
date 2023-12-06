@@ -9,8 +9,13 @@ use async_walkdir::WalkDir;
 use config::Environment;
 use futures_lite::StreamExt;
 use npk_sandbox::current::Controller;
-use tokio::fs::OpenOptions;
+use tokio::{fs::OpenOptions, task::JoinSet};
 use tracing_subscriber::EnvFilter;
+
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> ExitCode {
     let subscriber = tracing_subscriber::fmt()
@@ -35,6 +40,7 @@ fn main() -> ExitCode {
     }
 }
 
+#[tracing::instrument(level = "trace", name = "main", skip_all)]
 async fn controller_main(mut c: Controller) -> anyhow::Result<()> {
     let sb = c.new_sandbox().await?;
     sb.isolate_filesystem().await?;
@@ -43,11 +49,12 @@ async fn controller_main(mut c: Controller) -> anyhow::Result<()> {
     let mut walk = WalkDir::new(root);
 
     tracing::trace!("copying into sandbox");
+    let mut files = JoinSet::new();
+
     while let Some(entry) = walk.next().await {
         let entry = entry?;
         let full_path = entry.path();
         let root_path = full_path.strip_prefix(root).unwrap();
-        dbg!(root_path);
 
         if full_path.is_symlink() {
             let dest = tokio::fs::read_link(full_path.as_path()).await?;
@@ -61,15 +68,19 @@ async fn controller_main(mut c: Controller) -> anyhow::Result<()> {
             continue;
         }
 
-        dbg!(full_path.as_path());
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .create(false)
             .truncate(false)
             .open(full_path.as_path())
             .await?;
 
-        sb.write(root_path, &mut file, mode).await?;
+        tracing::debug!(?root_path, "copying");
+        files.spawn(sb.write(root_path, file, mode).await?);
+    }
+
+    while let Some(file) = files.join_next().await {
+        file???;
     }
 
     let env = [

@@ -1,14 +1,22 @@
-use std::{ffi::OsStr, path::Path, sync::atomic::AtomicU32};
+use std::{
+    ffi::OsStr,
+    ops::DerefMut,
+    path::{Path, PathBuf},
+    sync::atomic::AtomicU32,
+};
 
+use bytes::BytesMut;
 use nix::unistd::{Gid, Uid};
 use npk_util::{
     io::{TempDir, TempFile, Timeout},
+    pool::PooledItem,
     transport::AsyncPeer,
     BUFFER_POOL,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     net::{UnixListener, UnixStream},
+    sync::oneshot,
 };
 use tracing::{Instrument, Level};
 
@@ -201,9 +209,12 @@ impl Sandbox {
     pub async fn write(
         &self,
         path: impl AsRef<Path>,
-        data: &mut (impl AsyncRead + Unpin),
+        data: impl AsyncRead + Unpin + Send + 'static,
         mode: u32,
-    ) -> std::result::Result<(), PeerError> {
+    ) -> std::result::Result<
+        tokio::sync::oneshot::Receiver<std::result::Result<(), PeerError>>,
+        PeerError,
+    > {
         let id = self.id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let writer = self.peer.write_stream(id).await;
         self.peer
@@ -213,11 +224,16 @@ impl Sandbox {
                 mode,
             ))
             .await??;
-        let result: std::result::Result<(), PeerError> = async move {
+
+        async fn imp(
+            id: u32,
+            mut data: impl AsyncRead + Unpin,
+            writer: flume::Sender<PooledItem<'static, BytesMut>>,
+            peer: AsyncPeer,
+        ) -> std::result::Result<(), PeerError> {
             loop {
                 let mut buffer = BUFFER_POOL.take();
-                buffer.resize(8192, 0u8);
-                let len = data.read(&mut buffer).await?;
+                let len = data.read_buf(buffer.deref_mut()).await?;
                 if len == 0 {
                     break;
                 }
@@ -226,19 +242,19 @@ impl Sandbox {
                     break;
                 }
             }
+            drop(writer);
+            peer.request_result::<(), PeerError, _>(&SandboxRequest::EndFile(id))
+                .await??;
             Ok(())
         }
-        .await;
 
-        let end_result = self
-            .peer
-            .request_result::<(), _, _>(&SandboxRequest::EndFile(id))
-            .await;
+        let peer = self.peer.clone();
+        let (send, recv) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = imp(id, data, writer, peer).await;
+            send.send(result).ok();
+        });
 
-        if result.is_err() {
-            result
-        } else {
-            end_result?
-        }
+        Ok(recv)
     }
 }

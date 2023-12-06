@@ -397,6 +397,7 @@ impl Syscall for NixSysCall {
         }
         tracing::trace!("setting gids");
         setresgid(gid, gid, gid)?;
+        tracing::trace!("set gids");
         tracing::trace!("setting uids");
         setresuid(uid, uid, uid)?;
 

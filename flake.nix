@@ -38,7 +38,7 @@
         devShells.default = outputs.nickelpack.devShell.overrideAttrs (old: {
           packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb cargo-udeps];
           NPK__LINUX__RUNTIME_DIR = "/tmp/npk";
-          RUST_LOG = "info,npk_sandbox=trace";
+          RUST_LOG = "info,npk_sandbox=trace,npk_util=trace,npk_daemon=trace";
           shellHook = ''
             declare -a parts
             try_find() {

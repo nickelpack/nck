@@ -16,7 +16,6 @@ use npk_util::{
     transport::SyncPeer,
 };
 pub use proto::*;
-use tracing::Instrument;
 
 use crate::current::proto::PeerError;
 
