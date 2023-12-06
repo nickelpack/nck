@@ -1,10 +1,10 @@
 [package]
-name = "npk-sandbox"
+name = "nck-sandbox"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-npk-util.workspace = true
+nck-util.workspace = true
 thiserror.workspace = true
 rand.workspace = true
 tracing = { workspace = true, features = [ "attributes"] }

@@ -15,11 +15,11 @@ image=$(buildah commit $container)
 buildah rm $container
 trap "" EXIT
 
-[ -e npk-build.tar ] && rm npk-build.tar
+[ -e nck-build.tar ] && rm nck-build.tar
 
 container=$(podman create $image)
 trap "podman rm $container" EXIT
-podman export $container -o npk-build.tar
+podman export $container -o nck-build.tar
 
 mkdir -p rootfs
-tar xf npk-build.tar -C rootfs
+tar xf nck-build.tar -C rootfs

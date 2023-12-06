@@ -8,7 +8,7 @@ use std::{
 use async_walkdir::WalkDir;
 use config::Environment;
 use futures_lite::StreamExt;
-use npk_sandbox::current::Controller;
+use nck_sandbox::current::Controller;
 use tokio::{fs::OpenOptions, task::JoinSet};
 use tracing_subscriber::EnvFilter;
 
@@ -25,12 +25,12 @@ fn main() -> ExitCode {
     tracing::subscriber::set_global_default(subscriber).expect("failed to set subscriber");
 
     let config = config::Config::builder()
-        .add_source(Environment::with_prefix("npk").separator("__"))
+        .add_source(Environment::with_prefix("nck").separator("__"))
         .build()
         .unwrap();
     let config = config.try_deserialize().unwrap();
 
-    let result = npk_sandbox::current::main(config, controller_main);
+    let result = nck_sandbox::current::main(config, controller_main);
     match result {
         Some(Err(error)) => {
             tracing::error!(?error, "controller failed");
@@ -127,11 +127,11 @@ async fn controller_main(mut c: Controller) -> anyhow::Result<()> {
     sb.exec(
         "/src/glibc-2.38/configure",
         [
-            OsStr::new("--prefix=/var/npk/store/glibc"),
+            OsStr::new("--prefix=/var/nck/store/glibc"),
             OsStr::new("--enable-kernel=4.14"),
             OsStr::new("--disable-nscd"),
             OsStr::new("CFLAGS=-g -O2 -march=x86-64-v3"),
-            OsStr::new("libc_cv_slibdir=/var/npk/store/glibc/lib"),
+            OsStr::new("libc_cv_slibdir=/var/nck/store/glibc/lib"),
         ],
         env,
         "/build/glibc-2.38",

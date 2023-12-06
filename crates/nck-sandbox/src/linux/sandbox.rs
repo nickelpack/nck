@@ -14,7 +14,7 @@ use nix::{
     mount::MsFlags,
     sys::{personality::Persona, stat::Mode},
 };
-use npk_util::{io::Timeout, pool::PooledItem, transport::AsyncPeer};
+use nck_util::{io::Timeout, pool::PooledItem, transport::AsyncPeer};
 use speedy::{Readable, Writable};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt, net::UnixStream, sync::Mutex, task::JoinHandle};
 use tracing::Instrument;

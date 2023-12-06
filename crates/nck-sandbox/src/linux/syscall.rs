@@ -11,6 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use nck_util::io::TempDir;
 use nix::{
     errno::Errno,
     fcntl::{open, OFlag},
@@ -23,7 +24,6 @@ use nix::{
     },
     unistd::{fchdir, sethostname, setresgid, setresuid, ForkResult, Gid, Pid, Uid},
 };
-use npk_util::io::TempDir;
 use thiserror::Error;
 
 pub const SYS_NONE: Option<&Path> = None::<&Path>;

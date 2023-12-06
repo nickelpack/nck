@@ -13,9 +13,9 @@
         };
       };
     };
-    nci.crates.npk = {};
-    nci.crates.npk-daemon = {};
-    nci.crates.npk-sandbox = {};
-    nci.crates.npk-util = {};
+    nci.crates.nck = {};
+    nci.crates.nck-daemon = {};
+    nci.crates.nck-sandbox = {};
+    nci.crates.nck-util = {};
   };
 }

@@ -6,14 +6,14 @@ use std::{
     time::Duration,
 };
 
+use nck_util::{
+    io::{wait_for_file, TempDir, Timeout},
+    transport::SyncPeer,
+};
 use nix::{
     sched::CloneFlags,
     sys::stat::Mode,
     unistd::{ForkResult, Gid, Uid},
-};
-use npk_util::{
-    io::{wait_for_file, TempDir, Timeout},
-    transport::SyncPeer,
 };
 pub use proto::*;
 
@@ -29,7 +29,7 @@ const STACK_SIZE: usize = 1024 * 1024;
 
 #[tracing::instrument(name = "zygote_main", level = "trace", skip_all)]
 pub fn main<SC: Syscall + 'static>(cfg: super::Config) -> Result<()> {
-    if let Err(error) = prctl::set_name("npk-zygote") {
+    if let Err(error) = prctl::set_name("nck-zygote") {
         let error = nix::Error::from_i32(error);
         tracing::warn!(?error, "failed to set zygote process name");
     }

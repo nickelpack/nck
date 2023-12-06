@@ -37,8 +37,8 @@
         packages.default = outputs.nip.packages.release;
         devShells.default = outputs.nickelpack.devShell.overrideAttrs (old: {
           packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb cargo-udeps];
-          NPK__LINUX__RUNTIME_DIR = "/tmp/npk";
-          RUST_LOG = "info,npk_sandbox=trace,npk_util=trace,npk_daemon=trace";
+          NCK__LINUX__RUNTIME_DIR = "/tmp/nck";
+          RUST_LOG = "info,nck_sandbox=trace,nck_util=info,nck_daemon=trace";
           shellHook = ''
             declare -a parts
             try_find() {
@@ -59,15 +59,15 @@
             if user=$(try_find $(id -u) /etc/subuid) || user=$(try_find $(id -un) /etc/subuid); then
               parts=( )
               IFS=' ' read -r -a parts <<< "$user"
-              export NPK__LINUX__ID_MAP__UID_MIN=''${parts[0]}
-              export NPK__LINUX__ID_MAP__UID_MAX=''${parts[1]}
+              export NCK__LINUX__ID_MAP__UID_MIN=''${parts[0]}
+              export NCK__LINUX__ID_MAP__UID_MAX=''${parts[1]}
             fi
 
             if group=$(try_find $(id -g) /etc/subgid) || group=$(try_find $(id -gn) /etc/subgid); then
               parts=( )
               IFS=' ' read -r -a parts <<< "$group"
-              export NPK__LINUX__ID_MAP__GID_MIN=''${parts[0]}
-              export NPK__LINUX__ID_MAP__GID_MAX=''${parts[1]}
+              export NCK__LINUX__ID_MAP__GID_MIN=''${parts[0]}
+              export NCK__LINUX__ID_MAP__GID_MAX=''${parts[1]}
             fi
           '';
         });

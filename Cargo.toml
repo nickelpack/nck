@@ -22,8 +22,8 @@ crc = "3"
 futures-sink = "0.3"
 speedy = "0.8"
 
-npk-sandbox = { path = "./crates/npk-sandbox" }
-npk-util = { path = "./crates/npk-util" }
+nck-sandbox = { path = "./crates/nck-sandbox" }
+nck-util = { path = "./crates/nck-util" }
 
 [profile.dev]
 opt-level = 0

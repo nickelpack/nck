@@ -1,10 +1,10 @@
 [package]
-name = "npk-daemon"
+name = "nck-daemon"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-npk-sandbox.workspace = true
+nck-sandbox.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

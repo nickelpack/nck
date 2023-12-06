@@ -3,7 +3,6 @@
 
 pub mod io;
 pub mod pool;
-pub mod thread;
 pub mod transport;
 
 use std::sync::atomic::AtomicUsize;

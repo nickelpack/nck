@@ -7,7 +7,7 @@ use std::{
 
 use bytes::BytesMut;
 use nix::unistd::{Gid, Uid};
-use npk_util::{
+use nck_util::{
     io::{TempDir, TempFile, Timeout},
     pool::PooledItem,
     transport::AsyncPeer,
@@ -108,7 +108,7 @@ impl Controller {
     fn allocate_ids(&mut self) -> SpawnRequest {
         // TODO: These need to be grabbed from a pool
         SpawnRequest::new(
-            "npk-sandbox-01",
+            "nck-sandbox-01",
             Uid::from_raw(self.cfg.id_map.uid_min),
             Gid::from_raw(self.cfg.id_map.gid_min),
             Uid::from_raw(self.cfg.id_map.uid_min + 1),
