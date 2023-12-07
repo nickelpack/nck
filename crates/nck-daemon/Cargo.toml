@@ -14,6 +14,7 @@ serde = { workspace = true }
 config.workspace = true
 dashmap.workspace = true
 rand.workspace = true
+futures-util.workspace = true
 
-axum = {version = "0.7", default-features = false, features = [ "http1", "tokio"] }
+axum = {version = "0.7", default-features = false, features = [ "http1", "tokio", "multipart"] }
 blake3 = "1"

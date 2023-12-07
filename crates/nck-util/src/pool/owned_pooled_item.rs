@@ -82,6 +82,7 @@ impl<T, P: PoolReturn<T>> AsMut<T> for OwnedPooled<T, P> {
 }
 
 impl<T: PartialEq, P: PoolReturn<T>> PartialEq for OwnedPooled<T, P> {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.value.eq(&other.value)
     }

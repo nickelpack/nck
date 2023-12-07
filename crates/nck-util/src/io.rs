@@ -7,7 +7,10 @@ use std::{
     sync::atomic::AtomicUsize,
     time::{Duration, Instant},
 };
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::{
+    fs::{File, OpenOptions},
+    io::{AsyncRead, AsyncReadExt},
+};
 
 use rand::seq::SliceRandom;
 
@@ -116,6 +119,56 @@ pub struct TempFile {
 }
 
 impl TempFile {
+    pub async fn new() -> std::io::Result<(Self, File)> {
+        Self::new_in(std::env::temp_dir()).await
+    }
+
+    pub async fn new_in(parent: impl AsRef<Path>) -> std::io::Result<(Self, File)> {
+        const MAX_RETRIES: u32 = 1024;
+        let parent = parent.as_ref();
+        tokio::fs::create_dir_all(parent).await?;
+
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .write(true)
+            .append(false)
+            .truncate(false)
+            .create_new(true);
+
+        for _ in 0..MAX_RETRIES {
+            let date = std::time::SystemTime::now();
+            let duration = date
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let suffix = CHARS
+                .choose_multiple(&mut rand::thread_rng(), 8)
+                .map(|v| *v as char)
+                .collect::<String>();
+            let name = format!(
+                "{:x}-{:x}-{}",
+                COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+                duration,
+                suffix
+            );
+            let path = parent.join(name);
+            match options.open(path.as_path()).await {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    continue;
+                }
+                Err(e) => return Err(e),
+                Ok(file) => return Ok((Self { path }, file)),
+            }
+        }
+
+        Err(std::io::ErrorKind::AlreadyExists.into())
+    }
+
+    pub fn as_path(&self) -> &Path {
+        self.path.as_path()
+    }
+
     pub fn forget(mut self) -> PathBuf {
         std::mem::replace(&mut self.path, PathBuf::new())
     }

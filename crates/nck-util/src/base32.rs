@@ -9,13 +9,15 @@ use crate::{pool::Pooled, BUFFER_POOL};
 
 const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
 
-pub fn encode(data: &[u8]) -> String {
+pub fn encode(data: impl AsRef<[u8]>) -> String {
+    let data = data.as_ref();
     let mut ret = String::with_capacity((data.len() + 3) / 4 * 5);
     encode_into(data, &mut ret);
     ret
 }
 
-pub fn encode_into(data: &[u8], string: &mut String) {
+pub fn encode_into(data: impl AsRef<[u8]>, string: &mut String) {
+    let data = data.as_ref();
     string.reserve((data.len() + 3) / 4 * 5);
     for chunk in data.chunks(5) {
         let buf = {
@@ -121,8 +123,8 @@ mod test {
 
     #[test]
     fn masks_rfc4648() {
-        assert_eq!(encode(&[0xF8, 0x3E, 0x7F, 0x83, 0xE7]), "7a7h7a7h");
-        assert_eq!(encode(&[0x77, 0xC1, 0xF7, 0x7C, 0x1F]), "o7a7o7a7");
+        assert_eq!(encode([0xF8, 0x3E, 0x7F, 0x83, 0xE7]), "7a7h7a7h");
+        assert_eq!(encode([0x77, 0xC1, 0xF7, 0x7C, 0x1F]), "o7a7o7a7");
         assert_eq!(
             decode("7a7H7a7h").unwrap().as_ref().as_ref(),
             &[0xF8, 0x3E, 0x7F, 0x83, 0xE7]
@@ -131,7 +133,7 @@ mod test {
             decode("o7a7O7a7").unwrap().as_ref().as_ref(),
             &[0x77, 0xC1, 0xF7, 0x7C, 0x1F]
         );
-        assert_eq!(encode(&[0xF8, 0x3E, 0x7F, 0x83]), "7a7h7ay");
+        assert_eq!(encode([0xF8, 0x3E, 0x7F, 0x83]), "7a7h7ay");
     }
 
     #[test]
@@ -160,8 +162,8 @@ mod test {
 
     #[test]
     fn masks_unpadded_rfc4648() {
-        assert_eq!(encode(&[0xF8, 0x3E, 0x7F, 0x83, 0xE7]), "7a7h7a7h");
-        assert_eq!(encode(&[0x77, 0xC1, 0xF7, 0x7C, 0x1F]), "o7a7o7a7");
+        assert_eq!(encode([0xF8, 0x3E, 0x7F, 0x83, 0xE7]), "7a7h7a7h");
+        assert_eq!(encode([0x77, 0xC1, 0xF7, 0x7C, 0x1F]), "o7a7o7a7");
         assert_eq!(
             decode("7a7H7a7h").unwrap().as_ref().as_ref(),
             &[0xF8, 0x3E, 0x7F, 0x83, 0xE7]
@@ -170,7 +172,7 @@ mod test {
             decode("o7a7O7a7").unwrap().as_ref().as_ref(),
             &[0x77, 0xC1, 0xF7, 0x7C, 0x1F]
         );
-        assert_eq!(encode(&[0xF8, 0x3E, 0x7F, 0x83]), "7a7h7ay");
+        assert_eq!(encode([0xF8, 0x3E, 0x7F, 0x83]), "7a7h7ay");
     }
 
     #[test]

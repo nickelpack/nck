@@ -82,6 +82,7 @@ impl<'a, T> AsMut<T> for Pooled<'a, T> {
 }
 
 impl<'a, T: PartialEq> PartialEq for Pooled<'a, T> {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.value.eq(&other.value)
     }
@@ -90,12 +91,14 @@ impl<'a, T: PartialEq> PartialEq for Pooled<'a, T> {
 impl<'a, T: Eq> Eq for Pooled<'a, T> {}
 
 impl<'a, T: Hash> Hash for Pooled<'a, T> {
+    #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.value.hash(state)
     }
 }
 
 impl<'a, T: Clone + Copy> Clone for Pooled<'a, T> {
+    #[inline]
     fn clone(&self) -> Self {
         Pooled {
             value: self.value,

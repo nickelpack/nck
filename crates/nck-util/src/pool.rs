@@ -278,10 +278,10 @@ impl<'a, const CAPACITY: usize, T> Pool<'a, CAPACITY, T> {
 }
 
 const NULL_POOL: NullPool = NullPool;
-
 struct NullPool;
 
 impl<T> PoolReturn<T> for NullPool {
+    #[inline]
     fn return_value(&self, _: T) {}
 }
 
