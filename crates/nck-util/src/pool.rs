@@ -13,8 +13,8 @@ use std::{
 
 mod owned_pooled_item;
 mod pooled_item;
-pub use owned_pooled_item::OwnedPoolItem;
-pub use pooled_item::PooledItem;
+pub use owned_pooled_item::OwnedPooled;
+pub use pooled_item::Pooled;
 
 const EMPTY: u8 = 0;
 const WRITING: u8 = 1;
@@ -271,10 +271,18 @@ impl<'a, const CAPACITY: usize, T> Pool<'a, CAPACITY, T> {
     ///
     /// The returned object will return the value to the pool when dropped.
     #[inline]
-    pub fn take(&self) -> PooledItem<'_, T> {
+    pub fn take(&self) -> Pooled<'_, T> {
         let result = self.state.take();
-        PooledItem::new(result, &self.state)
+        Pooled::new(result, &self.state)
     }
+}
+
+const NULL_POOL: NullPool = NullPool;
+
+struct NullPool;
+
+impl<T> PoolReturn<T> for NullPool {
+    fn return_value(&self, _: T) {}
 }
 
 #[cfg(test)]
@@ -288,7 +296,7 @@ mod test {
         },
     };
 
-    use crate::pool::{PooledItem, EMPTY};
+    use crate::pool::{Pooled, EMPTY};
 
     use super::{Pool, PoolReturn};
 
@@ -305,7 +313,7 @@ mod test {
 
     #[test]
     pub fn threaded() {
-        let (send, receive) = channel::<PooledItem<Box<u64>>>();
+        let (send, receive) = channel::<Pooled<Box<u64>>>();
         let running = Arc::new(AtomicBool::new(true));
 
         let handle = std::thread::spawn(move || {

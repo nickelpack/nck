@@ -1,7 +1,7 @@
 #![feature(result_option_inspect)]
 #![feature(async_closure)]
 
-use std::{collections::HashMap, process::ExitCode, sync::Arc};
+use std::{process::ExitCode, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -226,7 +226,7 @@ impl<'de> Visitor<'de> for BlakeIdVisitor {
         E: serde::de::Error,
     {
         let mut result = BlakeId { data: [0u8; 32] };
-        base32::decode_into(v, &mut result.data).map_err(|_| {
+        base32::decode_into(v, &mut &mut result.data[..]).map_err(|_| {
             E::invalid_value(
                 serde::de::Unexpected::Str(v),
                 &"a RFC4648 base32-encoded blake3 hash",

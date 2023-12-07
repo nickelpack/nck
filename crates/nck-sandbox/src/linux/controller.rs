@@ -5,7 +5,7 @@ mod id_allocator;
 use bytes::BytesMut;
 use nck_util::{
     io::{TempDir, TempFile, Timeout},
-    pool::PooledItem,
+    pool::Pooled,
     transport::AsyncPeer,
     BUFFER_POOL,
 };
@@ -238,7 +238,7 @@ impl Sandbox {
         async fn imp(
             id: u32,
             mut data: impl AsyncRead + Unpin,
-            writer: flume::Sender<PooledItem<'static, BytesMut>>,
+            writer: flume::Sender<Pooled<'static, BytesMut>>,
             peer: AsyncPeer,
         ) -> std::result::Result<(), PeerError> {
             loop {

@@ -19,7 +19,7 @@ use tracing::Instrument;
 
 use crate::{
     io::{copy_to_buffer, copy_to_buffer_async},
-    pool::PooledItem,
+    pool::Pooled,
     BUFFER_POOL,
 };
 
@@ -150,7 +150,7 @@ fn validate_crc(
     }
 }
 
-type OverlapBuffer = PooledItem<'static, BytesMut>;
+type OverlapBuffer = Pooled<'static, BytesMut>;
 
 #[derive(Debug)]
 struct OverlapRequest {

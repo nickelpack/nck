@@ -1,6 +1,12 @@
 // A direct copy of: https://github.com/andreasots/base32/tree/master
 // except with lowercase and a fixed alphabet. See BASE32-LICENSE
 
+use std::io::Write;
+
+use bytes::BytesMut;
+
+use crate::{pool::Pooled, BUFFER_POOL};
+
 const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz234567";
 
 pub fn encode(data: &[u8]) -> String {
@@ -41,8 +47,9 @@ const INV_ALPHABET: [i8; 43] = [
     9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
 ];
 
-pub fn decode(data: &str) -> Option<Vec<u8>> {
-    let data = data.as_bytes();
+#[inline]
+fn calculate_data_length(data: impl AsRef<[u8]>) -> usize {
+    let data = data.as_ref();
     let mut unpadded_data_length = data.len();
     for i in 1..6.min(data.len()) + 1 {
         if data[data.len() - i] != b'=' {
@@ -50,81 +57,56 @@ pub fn decode(data: &str) -> Option<Vec<u8>> {
         }
         unpadded_data_length -= 1;
     }
-    let output_length = unpadded_data_length * 5 / 8;
-    let mut ret = Vec::with_capacity((output_length + 4) / 5 * 5);
-    for chunk in data.chunks(8) {
-        let buf = {
-            let mut buf = [0u8; 8];
-            for (i, &c) in chunk.iter().enumerate() {
-                match INV_ALPHABET.get(c.to_ascii_uppercase().wrapping_sub(b'0') as usize) {
-                    Some(&-1) | None => return None,
-                    Some(&value) => buf[i] = value as u8,
-                };
-            }
-            buf
-        };
-        ret.push((buf[0] << 3) | (buf[1] >> 2));
-        ret.push((buf[1] << 6) | (buf[2] << 1) | (buf[3] >> 4));
-        ret.push((buf[3] << 4) | (buf[4] >> 1));
-        ret.push((buf[4] << 7) | (buf[5] << 2) | (buf[6] >> 3));
-        ret.push((buf[6] << 5) | buf[7]);
-    }
-    ret.truncate(output_length);
-    Some(ret)
+    unpadded_data_length * 5 / 8
 }
 
-pub fn decode_into(data: &str, dest: &mut [u8]) -> std::fmt::Result {
-    let data = data.as_bytes();
-    let output_length = data.len() * 5 / 8;
-    if dest.len() != output_length {
-        return Err(std::fmt::Error);
-    }
-    let mut index = 0;
+pub fn decode(data: impl AsRef<[u8]>) -> std::io::Result<Pooled<'static, BytesMut>> {
+    let data = data.as_ref();
+    let length = calculate_data_length(data);
+    let mut buf = BUFFER_POOL.take();
+    buf.resize(length, 0u8);
+    decode_into(data, &mut &mut buf[..])?;
+    Ok(buf)
+}
+
+pub fn decode_into(data: impl AsRef<[u8]>, dest: &mut impl Write) -> std::io::Result<usize> {
+    let data = data.as_ref();
+    let output_length = calculate_data_length(data);
+    let mut wrote = 0;
     for chunk in data.chunks(8) {
         let buf = {
             let mut buf = [0u8; 8];
-            for (i, &c) in chunk.iter().enumerate() {
-                match INV_ALPHABET.get(c.to_ascii_uppercase().wrapping_sub(b'0') as usize) {
-                    Some(&-1) | None => return Err(std::fmt::Error),
+            for (i, c) in chunk.iter().map(|v| *v as usize).enumerate() {
+                // Approximately convert to uppercase, subsequent validation will fail if not alphanum.
+                let c = if c >= 0x60 { c - 0x20 } else { c };
+                match INV_ALPHABET.get(c.wrapping_sub(0x30)) {
+                    Some(&-1) | None => {
+                        return Err(std::io::Error::from(std::io::ErrorKind::InvalidData))
+                    }
                     Some(&value) => buf[i] = value as u8,
                 };
             }
             buf
         };
-        dest[index] = (buf[0] << 3) | (buf[1] >> 2);
-        index += 1;
-        if index == dest.len() {
-            break;
-        }
-        dest[index] = (buf[1] << 6) | (buf[2] << 1) | (buf[3] >> 4);
-        index += 1;
-        if index == dest.len() {
-            break;
-        }
-        dest[index] = (buf[3] << 4) | (buf[4] >> 1);
-        index += 1;
-        if index == dest.len() {
-            break;
-        }
-        dest[index] = (buf[4] << 7) | (buf[5] << 2) | (buf[6] >> 3);
-        index += 1;
-        if index == dest.len() {
-            break;
-        }
-        dest[index] = (buf[6] << 5) | buf[7];
-        index += 1;
-        if index == dest.len() {
-            break;
-        }
+        let vals = [
+            (buf[0] << 3) | (buf[1] >> 2),
+            (buf[1] << 6) | (buf[2] << 1) | (buf[3] >> 4),
+            (buf[3] << 4) | (buf[4] >> 1),
+            (buf[4] << 7) | (buf[5] << 2) | (buf[6] >> 3),
+            (buf[6] << 5) | buf[7],
+        ];
+        let to_copy = (output_length - wrote).min(vals.len());
+        dest.write_all(&vals[..to_copy])?;
+        wrote += to_copy;
     }
-    Ok(())
+    Ok(wrote)
 }
 
 #[cfg(test)]
 #[allow(dead_code, unused_attributes)]
 mod test {
-    use super::{decode, encode};
-    use std;
+    use super::{decode, decode_into, encode};
+    use std::{self, io::ErrorKind};
 
     #[derive(Clone)]
     struct B32 {
@@ -141,27 +123,74 @@ mod test {
     fn masks_rfc4648() {
         assert_eq!(encode(&[0xF8, 0x3E, 0x7F, 0x83, 0xE7]), "7a7h7a7h");
         assert_eq!(encode(&[0x77, 0xC1, 0xF7, 0x7C, 0x1F]), "o7a7o7a7");
-        assert_eq!(decode("7a7h7a7h").unwrap(), [0xF8, 0x3E, 0x7F, 0x83, 0xE7]);
-        assert_eq!(decode("o7a7o7a7").unwrap(), [0x77, 0xC1, 0xF7, 0x7C, 0x1F]);
-        assert_eq!(encode(&[0xF8, 0x3E, 0x7F, 0x83]), "7a7h7ay=");
+        assert_eq!(
+            decode("7a7H7a7h").unwrap().as_ref().as_ref(),
+            &[0xF8, 0x3E, 0x7F, 0x83, 0xE7]
+        );
+        assert_eq!(
+            decode("o7a7O7a7").unwrap().as_ref().as_ref(),
+            &[0x77, 0xC1, 0xF7, 0x7C, 0x1F]
+        );
+        assert_eq!(encode(&[0xF8, 0x3E, 0x7F, 0x83]), "7a7h7ay");
+    }
+
+    #[test]
+    fn encode_decode_into() {
+        for i in 0..=10u8 {
+            let src = [
+                0xA + i,
+                0xB + i,
+                0xC + i,
+                0xD + i,
+                0xE + i,
+                0xA0 + i,
+                0xB0 + i,
+                0xC0 + i,
+                0xD0 + i,
+                0xE0 + i,
+            ];
+            let val = &src[..(i as usize)];
+            let enc = encode(val);
+            let mut dest = Vec::new();
+            decode_into(&enc, &mut dest).unwrap();
+
+            assert_eq!(val, &dest[..]);
+        }
     }
 
     #[test]
     fn masks_unpadded_rfc4648() {
         assert_eq!(encode(&[0xF8, 0x3E, 0x7F, 0x83, 0xE7]), "7a7h7a7h");
         assert_eq!(encode(&[0x77, 0xC1, 0xF7, 0x7C, 0x1F]), "o7a7o7a7");
-        assert_eq!(decode("7a7h7a7h").unwrap(), [0xF8, 0x3E, 0x7F, 0x83, 0xE7]);
-        assert_eq!(decode("o7a7o7a7").unwrap(), [0x77, 0xC1, 0xF7, 0x7C, 0x1F]);
+        assert_eq!(
+            decode("7a7H7a7h").unwrap().as_ref().as_ref(),
+            &[0xF8, 0x3E, 0x7F, 0x83, 0xE7]
+        );
+        assert_eq!(
+            decode("o7a7O7a7").unwrap().as_ref().as_ref(),
+            &[0x77, 0xC1, 0xF7, 0x7C, 0x1F]
+        );
         assert_eq!(encode(&[0xF8, 0x3E, 0x7F, 0x83]), "7a7h7ay");
     }
 
     #[test]
     fn invalid_chars_rfc4648() {
-        assert_eq!(decode(","), None)
+        assert_eq!(decode(",").unwrap_err().kind(), ErrorKind::InvalidData)
     }
 
     #[test]
     fn invalid_chars_unpadded_rfc4648() {
-        assert_eq!(decode(","), None)
+        assert_eq!(decode(",").unwrap_err().kind(), ErrorKind::InvalidData)
+    }
+
+    #[test]
+    fn too_small() {
+        let mut buf = [0u8; 1];
+        assert_eq!(
+            decode_into("o7a7O7a7", &mut &mut buf[..])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WriteZero
+        )
     }
 }

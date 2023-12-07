@@ -1,14 +1,17 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    hash::Hash,
+    ops::{Deref, DerefMut},
+};
 
-use super::PoolReturn;
+use super::{PoolReturn, NULL_POOL};
 
 /// A value that was retrieved from a `Pool`.
-pub struct PooledItem<'a, T> {
+pub struct Pooled<'a, T> {
     value: Option<T>,
     pool: &'a dyn PoolReturn<T>,
 }
 
-impl<'a, T> PooledItem<'a, T> {
+impl<'a, T> Pooled<'a, T> {
     /// Creates a new pooled item.
     pub fn new(value: T, pool: &'a impl PoolReturn<T>) -> Self {
         Self {
@@ -39,7 +42,7 @@ impl<'a, T> PooledItem<'a, T> {
     }
 }
 
-impl<'a, T: std::fmt::Debug> std::fmt::Debug for PooledItem<'a, T> {
+impl<'a, T: std::fmt::Debug> std::fmt::Debug for Pooled<'a, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.value.as_ref() {
             Some(v) => v.fmt(f),
@@ -48,7 +51,7 @@ impl<'a, T: std::fmt::Debug> std::fmt::Debug for PooledItem<'a, T> {
     }
 }
 
-impl<'a, T> Deref for PooledItem<'a, T> {
+impl<'a, T> Deref for Pooled<'a, T> {
     type Target = T;
 
     #[inline]
@@ -57,28 +60,51 @@ impl<'a, T> Deref for PooledItem<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for PooledItem<'a, T> {
+impl<'a, T> DerefMut for Pooled<'a, T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.value.as_mut().unwrap()
     }
 }
 
-impl<'a, T> AsRef<T> for PooledItem<'a, T> {
+impl<'a, T> AsRef<T> for Pooled<'a, T> {
     #[inline]
     fn as_ref(&self) -> &T {
         self.value.as_ref().unwrap()
     }
 }
 
-impl<'a, T> AsMut<T> for PooledItem<'a, T> {
+impl<'a, T> AsMut<T> for Pooled<'a, T> {
     #[inline]
     fn as_mut(&mut self) -> &mut T {
         self.value.as_mut().unwrap()
     }
 }
 
-impl<'a, T> Drop for PooledItem<'a, T> {
+impl<'a, T: PartialEq> PartialEq for Pooled<'a, T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value.eq(&other.value)
+    }
+}
+
+impl<'a, T: Eq> Eq for Pooled<'a, T> {}
+
+impl<'a, T: Hash> Hash for Pooled<'a, T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.value.hash(state)
+    }
+}
+
+impl<'a, T: Clone + Copy> Clone for Pooled<'a, T> {
+    fn clone(&self) -> Self {
+        Pooled {
+            value: self.value,
+            pool: &NULL_POOL,
+        }
+    }
+}
+
+impl<'a, T> Drop for Pooled<'a, T> {
     #[inline]
     fn drop(&mut self) {
         if let Some(old) = self.value.take() {

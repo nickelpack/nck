@@ -1,8 +1,8 @@
 use std::sync::{atomic::AtomicU32, Arc};
 
-use nck_util::pool::OwnedPoolItem;
+use nck_util::pool::OwnedPooled;
 
-pub type PooledId = OwnedPoolItem<u32, flume::Sender<u32>>;
+pub type PooledId = OwnedPooled<u32, flume::Sender<u32>>;
 
 #[derive(Debug, Clone)]
 pub struct IdAllocator {
@@ -36,6 +36,6 @@ impl IdAllocator {
         } else {
             self.next_free.recv_async().await.unwrap()
         };
-        OwnedPoolItem::new(result, self.return_item.clone())
+        OwnedPooled::new(result, self.return_item.clone())
     }
 }

@@ -10,11 +10,11 @@ use std::{
 
 use bytes::BytesMut;
 use flume::Receiver;
+use nck_util::{io::Timeout, pool::Pooled, transport::AsyncPeer};
 use nix::{
     mount::MsFlags,
     sys::{personality::Persona, stat::Mode},
 };
-use nck_util::{io::Timeout, pool::PooledItem, transport::AsyncPeer};
 use speedy::{Readable, Writable};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt, net::UnixStream, sync::Mutex, task::JoinHandle};
 use tracing::Instrument;
@@ -283,7 +283,7 @@ impl<SC: Syscall + 'static> SandboxProcess<SC> {
     async fn begin_file(
         &self,
         id: u32,
-        receiver: Receiver<PooledItem<'static, BytesMut>>,
+        receiver: Receiver<Pooled<'static, BytesMut>>,
         path: &Path,
         mode: u32,
     ) -> std::result::Result<(), PeerError> {
