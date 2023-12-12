@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use nck_util::io::TempDir;
+use nck_core::io::TempDir;
 use nix::{
     errno::Errno,
     fcntl::{open, OFlag},
@@ -145,7 +145,11 @@ impl ProcessState {
 pub type Result<T> = std::result::Result<T, SyscallError>;
 
 pub trait Syscall: Send + Sync {
-    fn bind(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<()>;
+    fn bind(
+        src: impl AsRef<Path>,
+        dest: impl AsRef<Path>,
+        additional_flags: Option<MsFlags>,
+    ) -> Result<()>;
     fn pivot(new_root: impl AsRef<Path>) -> Result<()>;
     fn mount<P1: AsRef<Path>, P2: AsRef<OsStr>, P3: AsRef<OsStr>>(
         source: Option<P1>,
@@ -188,7 +192,11 @@ pub struct NixSysCall;
 
 impl Syscall for NixSysCall {
     #[tracing::instrument(level = "trace", skip_all, fields(src = ?src.as_ref(), dest = ?dest.as_ref()))]
-    fn bind(src: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<()> {
+    fn bind(
+        src: impl AsRef<Path>,
+        dest: impl AsRef<Path>,
+        additional_flags: Option<MsFlags>,
+    ) -> Result<()> {
         let src = src.as_ref();
         let dest = dest.as_ref();
 
@@ -215,7 +223,7 @@ impl Syscall for NixSysCall {
             Some(src),
             dest,
             Some(MountType::Bind),
-            MsFlags::MS_REC | MsFlags::MS_BIND,
+            MsFlags::MS_REC | MsFlags::MS_BIND | additional_flags.unwrap_or_else(MsFlags::empty),
             SYS_NONE,
         )
     }

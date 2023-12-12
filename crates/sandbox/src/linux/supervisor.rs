@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use nix::{
     sys::wait::{waitpid, WaitPidFlag},
     unistd::Pid,
@@ -9,9 +11,10 @@ use signal_hook::{
 
 use super::syscall::{ChildProcess, Result, Syscall, TempMount};
 
-pub fn main<SC: Syscall>(name: &str, child: Pid, rootfs_dir: TempMount<SC>) -> isize {
+pub fn main<SC: Syscall>(path: PathBuf, child: Pid, rootfs_dir: TempMount<SC>) -> isize {
     let child_proc: ChildProcess<SC> = child.into();
-    if let Err(error) = supervisor_main(name, child_proc, rootfs_dir) {
+    let path = path.join("supervisor");
+    if let Err(error) = supervisor_main(path, child_proc, rootfs_dir) {
         tracing::error!(?error, "supervisor failed");
         -1
     } else {
@@ -21,11 +24,11 @@ pub fn main<SC: Syscall>(name: &str, child: Pid, rootfs_dir: TempMount<SC>) -> i
 
 #[tracing::instrument(level = "trace", skip_all)]
 fn supervisor_main<SC: Syscall>(
-    name: &str,
+    path: PathBuf,
     child: ChildProcess<SC>,
     rootfs_dir: TempMount<SC>,
 ) -> Result<()> {
-    if let Err(error) = prctl::set_name(format!("super-{}", name).as_str()) {
+    if let Err(error) = prctl::set_name(&path.to_string_lossy()) {
         let error = nix::Error::from_i32(error);
         tracing::warn!(?error, "failed to set supervisor process name");
     }

@@ -1,6 +1,6 @@
 use std::sync::{atomic::AtomicU32, Arc};
 
-use nck_util::pool::OwnedPooled;
+use nck_core::pool::OwnedPooled;
 
 pub type PooledId = OwnedPooled<u32, flume::Sender<u32>>;
 

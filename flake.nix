@@ -30,15 +30,10 @@
       }: let
         outputs = config.nci.outputs;
       in {
-        # Per-system attributes can be defined here. The self' and inputs'
-        # module parameters provide easy access to attributes of the same
-        # system.
-
         packages.default = outputs.nip.packages.release;
         devShells.default = outputs.nickelpack.devShell.overrideAttrs (old: {
-          packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb cargo-udeps];
-          NCK__SANDBOX__LINUX__RUNTIME_DIR = "/tmp/nck";
-          RUST_LOG = "info,nck_sandbox=trace,nck_util=info,nck_daemon=trace";
+          packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb cargo-udeps curl jq];
+          RUST_LOG = "info,nck_sandbox=trace,nck_core=trace,nck_daemon=trace";
           shellHook = ''
             declare -a parts
             try_find() {
@@ -59,15 +54,15 @@
             if user=$(try_find $(id -u) /etc/subuid) || user=$(try_find $(id -un) /etc/subuid); then
               parts=( )
               IFS=' ' read -r -a parts <<< "$user"
-              export NCK__SANDBOX__LINUX__ID_MAP__UID_MIN=''${parts[0]}
-              export NCK__SANDBOX__LINUX__ID_MAP__UID_MAX=''${parts[1]}
+              export NCK__LINUX__SUB_UID__MIN=''${parts[0]}
+              export NCK__LINUX__SUB_UID__MAX=''${parts[1]}
             fi
 
             if group=$(try_find $(id -g) /etc/subgid) || group=$(try_find $(id -gn) /etc/subgid); then
               parts=( )
               IFS=' ' read -r -a parts <<< "$group"
-              export NCK__SANDBOX__LINUX__ID_MAP__GID_MIN=''${parts[0]}
-              export NCK__SANDBOX__LINUX__ID_MAP__GID_MAX=''${parts[1]}
+              export NCK__LINUX__SUB_GID__MIN=''${parts[0]}
+              export NCK__LINUX__SUB_GID__MAX=''${parts[1]}
             fi
           '';
         });

@@ -16,6 +16,6 @@
     nci.crates.nck = {};
     nci.crates.nck-daemon = {};
     nci.crates.nck-sandbox = {};
-    nci.crates.nck-util = {};
+    nci.crates.nck-core = {};
   };
 }

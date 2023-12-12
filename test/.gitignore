@@ -1,2 +1,5 @@
 rootfs/
+src/
+support/
+script
 nck-build.tar

@@ -4,21 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nck-util.workspace = true
+nck-core.workspace = true
+
 thiserror.workspace = true
 rand.workspace = true
 tracing = { workspace = true, features = [ "attributes"] }
 tokio = { workspace = true, features = [ "net", "rt", "rt-multi-thread", "time", "macros", "io-util", "fs", "sync" ] }
 serde = { workspace = true, features = [ "derive"] }
 bitflags = { workspace = true, features = [ "serde" ] }
-config.workspace = true
 flume.workspace = true
 once_cell.workspace = true
-crc.workspace = true
-speedy.workspace = true
-parking_lot.workspace = true
-
-bytes = "1"
+blake3.workspace = true
+bytes.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 procfs = "0.16"
