@@ -1,0 +1,16 @@
+[package]
+name = "nck-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror.workspace = true
+tokio = {workspace = true, features = ["io-util", "time", "sync", "rt", "net", "macros", "fs"]}
+rand.workspace = true
+tracing.workspace = true
+once_cell.workspace = true
+flume.workspace = true
+dashmap.workspace = true
+bytes.workspace = true
+serde = { workspace = true, features = ["derive"] }
+blake3.workspace = true

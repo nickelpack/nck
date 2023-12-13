@@ -2,4 +2,4 @@ rootfs/
 src/
 support/
 script
-nck-build.tar
+rootfs.tar
