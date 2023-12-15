@@ -6,10 +6,9 @@ use std::{
     str::FromStr,
 };
 
+use nck_core::hashing::{DeterministicHash, DeterministicHasher};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-
-use crate::hashing::{DeterministicHash, DeterministicHasher};
 
 #[derive(Debug)]
 pub struct SpecFile<'a> {
@@ -153,7 +152,7 @@ impl DeterministicHash for Spec {
             .update_hash(&self.env)
             .update_hash(&self.impure_env)
             .update_hash(&self.copy)
-            // The output path can't be known until the hash is calculated
+            // This would cause a catch-22.
             .update_iter(self.outputs.keys());
     }
 }

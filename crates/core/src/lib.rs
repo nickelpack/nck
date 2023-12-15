@@ -5,7 +5,6 @@ pub mod base32;
 pub mod hashing;
 pub mod io;
 pub mod pool;
-pub mod spec;
 
 use std::sync::atomic::AtomicUsize;
 

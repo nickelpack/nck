@@ -40,6 +40,18 @@ impl<'a, T> Pooled<'a, T> {
     pub fn forget(mut self) -> T {
         self.value.take().unwrap()
     }
+
+    /// Applies the given function to the contained value.
+    pub fn apply_result<E>(mut self, f: impl FnOnce(T) -> Result<T, E>) -> Result<Self, E> {
+        let value = self.value.take().unwrap();
+        match f(value) {
+            Ok(value) => {
+                self.value = Some(value);
+                Ok(self)
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 impl<'a, T: std::fmt::Debug> std::fmt::Debug for Pooled<'a, T> {

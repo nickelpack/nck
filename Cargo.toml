@@ -4,7 +4,7 @@ resolver = "2"
 
 [workspace.dependencies]
 thiserror = "1"
-color-eyre = "0.6"
+anyhow = "1"
 rand = "0.8"
 tracing = "0.1"
 tracing-core = "0.1"
@@ -23,7 +23,6 @@ blake3 = "1"
 bytes = "1"
 uuid = "1"
 
-nck-sandbox = { path = "./crates/sandbox" }
 nck-core = { path = "./crates/core" }
 
 [profile.dev]
