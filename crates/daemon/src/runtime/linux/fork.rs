@@ -28,6 +28,14 @@ pub enum CloneError {
     UnknownErrno(i32),
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ForkError {
+    #[error("failed to fork process")]
+    Fork(#[source] nix::Error),
+    #[error("the child returned with {0:x}")]
+    ErrorCode(i32),
+}
+
 /// The callback function used in clone system call. The return value is i32
 /// which is consistent with C functions return code. The trait has to be
 /// `FnMut` because we need to be able to call the closure multiple times, once
@@ -37,42 +45,49 @@ pub enum CloneError {
 /// pass in a child stack, which is empty. By storing the closure in heap, we
 /// can then in the new process to re-box the heap memory back to a closure
 /// correctly.
-type CloneCb = Box<dyn FnMut() -> i32>;
+pub type CloneCb<R> = Box<dyn FnMut() -> R>;
 
 /// A type that can be converted into an exit code.
 pub trait IntoExitCode {
     /// Converts the current type into an exit code.
-    fn into_exit_code(&self) -> i32;
+    fn report(&self) -> i32;
 }
 
 impl<T, E: IntoExitCode> IntoExitCode for Result<T, E> {
-    fn into_exit_code(&self) -> i32 {
+    fn report(&self) -> i32 {
         match self {
             Ok(_) => 0,
-            Err(v) => v.into_exit_code(),
+            Err(v) => v.report(),
         }
     }
 }
 
 impl IntoExitCode for anyhow::Error {
-    fn into_exit_code(&self) -> i32 {
+    fn report(&self) -> i32 {
         tracing::error!(?self, "process failed");
         -1
     }
 }
 
 impl IntoExitCode for i32 {
-    fn into_exit_code(&self) -> i32 {
+    fn report(&self) -> i32 {
         *self
     }
 }
 
+// Fork a child process and execute the callback.
+pub fn fork() -> Result<Option<Pid>, ForkError> {
+    match unsafe { nix::unistd::fork() }.map_err(ForkError::Fork)? {
+        nix::unistd::ForkResult::Parent { child } => Ok(Some(child)),
+        nix::unistd::ForkResult::Child => Ok(None),
+    }
+}
+
 // Clone a child process and execute the callback.
-pub fn container_clone<R: IntoExitCode + std::fmt::Debug>(
-    cb: impl FnMut() -> R,
-    mut clone_flags: CloneFlags,
+pub fn clone<R: IntoExitCode + std::fmt::Debug>(
+    cb: CloneCb<R>,
+    clone_flags: CloneFlags,
 ) -> Result<Pid, CloneError> {
-    let cb = Box::new(move || cb().into_exit_code());
     if clone_flags.intersects(CloneFlags::CLONE_PARENT) {
         clone_internal(cb, clone_flags.bits() as u64, None)
     } else {
@@ -81,8 +96,8 @@ pub fn container_clone<R: IntoExitCode + std::fmt::Debug>(
 }
 
 // An internal wrapper to manage the clone3 vs clone fallback logic.
-fn clone_internal(
-    mut cb: CloneCb,
+fn clone_internal<R: IntoExitCode + std::fmt::Debug>(
+    mut cb: CloneCb<R>,
     flags: u64,
     exit_signal: Option<u64>,
 ) -> Result<Pid, CloneError> {
@@ -91,7 +106,7 @@ fn clone_internal(
         // For now, we decide to only fallback on ENOSYS
         Err(CloneError::Clone(nix::Error::ENOSYS)) => {
             tracing::debug!("clone3 is not supported, fallback to clone");
-            let pid = clone(cb, flags, exit_signal)?;
+            let pid = clone_fallback(cb, flags, exit_signal)?;
 
             Ok(pid)
         }
@@ -102,7 +117,11 @@ fn clone_internal(
 // Unlike the clone call, clone3 is currently using the kernel syscall, mimicking
 // the interface of fork. There is not need to explicitly manage the memory, so
 // we can safely passing the callback closure as reference.
-fn clone3(cb: &mut CloneCb, flags: u64, exit_signal: Option<u64>) -> Result<Pid, CloneError> {
+fn clone3<R: IntoExitCode + std::fmt::Debug>(
+    cb: &mut CloneCb<R>,
+    flags: u64,
+    exit_signal: Option<u64>,
+) -> Result<Pid, CloneError> {
     #[repr(C)]
     struct Clone3Args {
         flags: u64,
@@ -143,14 +162,18 @@ fn clone3(cb: &mut CloneCb, flags: u64, exit_signal: Option<u64>) -> Result<Pid,
         0 => {
             // Inside the cloned process, we execute the callback and exit with
             // the return code.
-            std::process::exit(cb());
+            std::process::exit(cb().report());
         }
         ret if ret >= 0 => Ok(Pid::from_raw(ret as i32)),
         ret => Err(CloneError::UnknownErrno(ret as i32)),
     }
 }
 
-fn clone(cb: CloneCb, flags: u64, exit_signal: Option<u64>) -> Result<Pid, CloneError> {
+fn clone_fallback<R: IntoExitCode + std::fmt::Debug>(
+    cb: CloneCb<R>,
+    flags: u64,
+    exit_signal: Option<u64>,
+) -> Result<Pid, CloneError> {
     const DEFAULT_STACK_SIZE: usize = 8 * 1024 * 1024; // 8M
     const DEFAULT_PAGE_SIZE: usize = 4 * 1024; // 4K
 
@@ -228,8 +251,8 @@ fn clone(cb: CloneCb, flags: u64, exit_signal: Option<u64>) -> Result<Pid, Clone
     // arg is actually a raw pointer to the Box closure. so here, we re-box the
     // pointer back into a box closure so the main takes ownership of the
     // memory. Then we can call the closure.
-    extern "C" fn main(data: *mut libc::c_void) -> libc::c_int {
-        unsafe { Box::from_raw(data as *mut CloneCb)() }
+    extern "C" fn main<RR: IntoExitCode + std::fmt::Debug>(data: *mut libc::c_void) -> libc::c_int {
+        unsafe { Box::from_raw(data as *mut CloneCb<RR>)().report() }
     }
 
     // The nix::sched::clone wrapper doesn't provide the right interface.  Using
@@ -244,7 +267,7 @@ fn clone(cb: CloneCb, flags: u64, exit_signal: Option<u64>) -> Result<Pid, Clone
     // Ref: https://github.com/nix-rust/nix/pull/920
     let ret = unsafe {
         libc::clone(
-            main,
+            main::<R>,
             child_stack_top,
             combined_flags,
             data as *mut libc::c_void,
@@ -271,11 +294,10 @@ mod test {
     use crate::runtime::linux::channel::unix_pair;
     use anyhow::{bail, Context, Result};
     use nix::sys::wait::{waitpid, WaitStatus};
-    use nix::unistd;
 
     #[test]
-    fn test_container_fork() -> Result<()> {
-        let pid = container_clone(Box::new(|| 0), CloneFlags::empty())?;
+    fn test_clone() -> Result<()> {
+        let pid = clone(Box::new(|| 0), CloneFlags::empty())?;
         match waitpid(pid, None).expect("wait pid failed.") {
             WaitStatus::Exited(p, status) => {
                 assert_eq!(pid, p);
@@ -287,8 +309,8 @@ mod test {
     }
 
     #[test]
-    fn test_container_err_fork() -> Result<()> {
-        let pid = container_clone(Box::new(|| -1), CloneFlags::empty())?;
+    fn test_clone_err() -> Result<()> {
+        let pid = clone(Box::new(|| -1), CloneFlags::empty())?;
         match waitpid(pid, None).expect("wait pid failed.") {
             WaitStatus::Exited(p, status) => {
                 assert_eq!(pid, p);
@@ -300,7 +322,7 @@ mod test {
     }
 
     #[test]
-    fn test_container_clone_sibling() -> Result<()> {
+    fn test_clone_parent() -> Result<()> {
         // The `container_clone_sibling` will create a sibling process (share
         // the same parent) of the calling process. In Unix, a process can only
         // wait on the immediate children process and can't wait on the sibling
@@ -312,19 +334,19 @@ mod test {
 
         // We need to use a channel so that the forked process can pass the pid
         // of the sibling process to the testing process.
-        let (sender, receiver) = &mut unix_pair::<i32>()?;
+        let (child_channel, server_channel) = &mut unix_pair::<i32, i32>()?;
 
-        match unsafe { unistd::fork()? } {
-            unistd::ForkResult::Parent { child } => {
-                let receiver = receiver
+        match super::fork()? {
+            Some(child) => {
+                let channel = server_channel
                     .clone()
-                    .realize()
+                    .into_peer()
                     .expect("the receiver can be realized");
                 let sibling_process_pid =
-                    Pid::from_raw(receiver.recv().with_context(|| {
+                    Pid::from_raw(channel.recv().with_context(|| {
                         "failed to receive the sibling pid from forked process"
                     })?);
-                drop(receiver);
+                drop(channel);
                 match waitpid(sibling_process_pid, None).expect("wait pid failed.") {
                     WaitStatus::Exited(p, status) => {
                         assert_eq!(sibling_process_pid, p);
@@ -341,13 +363,13 @@ mod test {
                     _ => bail!("failed to wait on the forked process"),
                 }
             }
-            unistd::ForkResult::Child => {
+            None => {
                 // Inside the forked process. We call `container_clone` and pass
                 // the pid to the parent process.
-                let sender = sender.clone().realize()?;
-                let pid = container_clone(Box::new(|| 0), CloneFlags::CLONE_PARENT)?;
-                sender.send(&pid.as_raw())?;
-                drop(sender);
+                let channel = child_channel.clone().into_peer()?;
+                let pid = clone(Box::new(|| 0), CloneFlags::CLONE_PARENT)?;
+                channel.send(pid.as_raw())?;
+                drop(channel);
                 std::process::exit(0);
             }
         };

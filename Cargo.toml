@@ -22,6 +22,7 @@ dashmap = "5"
 blake3 = "1"
 bytes = "1"
 uuid = "1"
+rstest = "0.18"
 
 nck-core = { path = "./crates/core" }
 
