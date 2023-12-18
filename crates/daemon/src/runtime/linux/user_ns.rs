@@ -1,4 +1,5 @@
 use nix::unistd::Pid;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,7 +35,7 @@ pub enum MappingError {
     WriteIDMapping(#[source] std::io::Error),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LinuxIdMapping {
     container_id: u32,
     host_id: u32,
@@ -61,7 +62,7 @@ impl LinuxIdMapping {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserNamespaceConfig {
     /// Location of the newuidmap binary
     newuidmap: PathBuf,
@@ -74,7 +75,7 @@ pub struct UserNamespaceConfig {
 }
 
 impl UserNamespaceConfig {
-    pub fn new(mut user_ns_config: UserNamespaceConfig) -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let (newuidmap, newgidmap) = lookup_map_binaries()?;
         Ok(Self {
             newuidmap,
@@ -82,6 +83,19 @@ impl UserNamespaceConfig {
             uid_mappings: Vec::new(),
             gid_mappings: Vec::new(),
         })
+    }
+
+    pub fn uid_mappings_mut(&mut self) -> &mut Vec<LinuxIdMapping> {
+        &mut self.uid_mappings
+    }
+
+    pub fn gid_mappings_mut(&mut self) -> &mut Vec<LinuxIdMapping> {
+        &mut self.gid_mappings
+    }
+
+    pub fn write_mappings(&self, target_pid: Pid) -> Result<()> {
+        self.write_gid_mapping(target_pid)?;
+        self.write_uid_mapping(target_pid)
     }
 
     pub fn write_uid_mapping(&self, target_pid: Pid) -> Result<()> {

@@ -21,6 +21,8 @@ type PacketLength = u16;
 const PACKET_LENGTH_SIZE: usize = std::mem::size_of::<PacketLength>();
 
 /// This contains a list of file descriptors for use during serialization and deserialization.
+///
+/// It basically exists to ensure that fds are cleand up if something fails.
 #[derive(Debug)]
 struct FdQueue(VecDeque<i32>);
 
@@ -299,6 +301,7 @@ mod async_impl {
 
     use super::{FdQueue, PacketLength, PACKET_LENGTH_SIZE};
 
+    #[derive(Debug)]
     struct State {
         read: Mutex<()>,
         write: Mutex<()>,
@@ -306,6 +309,7 @@ mod async_impl {
         fd: RawFd,
     }
 
+    #[derive(Debug)]
     pub struct AsyncChannel<S, R> {
         state: Arc<State>,
         _p: PhantomData<(S, R)>,
@@ -481,11 +485,13 @@ mod sync_impl {
 
     use super::{FdQueue, PacketLength, PACKET_LENGTH_SIZE};
 
+    #[derive(Debug)]
     struct State {
         read: Mutex<UnixStream>,
         write: Mutex<UnixStream>,
     }
 
+    #[derive(Debug)]
     pub struct Channel<S, R> {
         state: Arc<State>,
         _p: PhantomData<(S, R)>,

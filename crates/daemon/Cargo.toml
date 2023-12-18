@@ -7,7 +7,7 @@ edition = "2021"
 nck-core.workspace = true
 
 anyhow.workspace = true
-tokio = {workspace = true, features = ["io-util", "time", "sync", "rt", "net", "macros", "fs"]}
+tokio = {workspace = true, features = ["io-util", "time", "sync", "rt", "net", "macros", "fs", "rt-multi-thread"]}
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = [ "env-filter" ] }
 config.workspace = true
