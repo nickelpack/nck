@@ -291,7 +291,7 @@ fn clone_fallback<R: IntoExitCode + std::fmt::Debug>(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::runtime::linux::channel::unix_pair;
+    use crate::build::linux::channel::unix_pair;
     use anyhow::{bail, Context, Result};
     use nix::sys::wait::{waitpid, WaitStatus};
 

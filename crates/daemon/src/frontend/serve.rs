@@ -1,7 +1,7 @@
 use std::{net::ToSocketAddrs, sync::Arc};
 
+use anyhow::Context;
 use axum::extract::connect_info::Connected;
-use color_eyre::eyre::{self, Context};
 use hyper::{
     body::Incoming,
     rt::{Read, Write},
@@ -103,14 +103,14 @@ impl Connected<&Client> for ClientInfo {
     }
 }
 
-pub async fn serve(tcp: TcpSettings, router: axum::Router) -> eyre::Result<()>
+pub async fn serve(tcp: TcpSettings, router: axum::Router) -> anyhow::Result<()>
 where
 {
-    if tokio::fs::try_exists(SOCKET_PATH).await.is_ok() {
+    if tokio::fs::try_exists(SOCKET_PATH).await? {
         tracing::trace!("cleaning up previous socket at {}", SOCKET_PATH);
         tokio::fs::remove_file(SOCKET_PATH)
             .await
-            .wrap_err_with(|| format!("failed to bind to {}", SOCKET_PATH))?;
+            .with_context(|| format!("failed to bind to {}", SOCKET_PATH))?;
     }
 
     tracing::trace!("binding to {}", SOCKET_PATH);

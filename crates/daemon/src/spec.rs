@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::{OsStr, OsString},
     fmt::Display,
     path::{Path, PathBuf},
     str::FromStr,
@@ -35,9 +34,9 @@ impl<'a> SpecFile<'a> {
 pub struct Spec {
     name: PackageName,
     entry: PathBuf,
-    args: Vec<OsString>,
-    env: BTreeMap<OsString, OsString>,
-    impure_env: BTreeSet<OsString>,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    impure_env: BTreeSet<String>,
     outputs: BTreeMap<OutputName, PathBuf>,
     copy: BTreeMap<PathBuf, (PathBuf, bool)>,
 }
@@ -63,52 +62,52 @@ impl Spec {
         self.entry.as_path()
     }
 
-    pub fn args_iter(&self) -> impl ExactSizeIterator<Item = &OsStr> {
-        self.args.iter().map(|v| v.as_os_str())
+    pub fn args_iter(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.args.iter().map(|v| v.as_str())
     }
 
-    pub fn push_arg(&mut self, arg: impl AsRef<OsStr>) {
-        self.args.push(arg.as_ref().to_os_string())
+    pub fn push_arg(&mut self, arg: impl AsRef<str>) {
+        self.args.push(arg.as_ref().to_string())
     }
 
-    pub fn push_args<S: AsRef<OsStr>>(&mut self, arg: impl Iterator<Item = S>) {
+    pub fn push_args<S: AsRef<str>>(&mut self, arg: impl Iterator<Item = S>) {
         for item in arg {
-            self.args.push(item.as_ref().to_os_string())
+            self.args.push(item.as_ref().to_string())
         }
     }
 
-    pub fn env_iter(&self) -> impl ExactSizeIterator<Item = (&OsStr, &OsStr)> {
-        self.env.iter().map(|(k, v)| (k.as_os_str(), v.as_os_str()))
+    pub fn env_iter(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+        self.env.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
-    pub fn set_env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) {
+    pub fn set_env(&mut self, key: impl AsRef<str>, value: impl AsRef<str>) {
         let key = key.as_ref();
         let value = value.as_ref();
-        self.env.insert(key.to_os_string(), value.to_os_string());
+        self.env.insert(key.to_string(), value.to_string());
     }
 
-    pub fn update_env<R: AsRef<OsStr>>(
+    pub fn update_env<R: AsRef<str>>(
         &mut self,
-        key: impl AsRef<OsStr>,
-        value: impl FnOnce(&OsStr) -> R,
+        key: impl AsRef<str>,
+        value: impl FnOnce(&str) -> R,
     ) {
         let key = key.as_ref();
 
         self.env
-            .entry(key.to_os_string())
+            .entry(key.to_string())
             .and_modify(|k| {
-                let r = value(k.as_os_str());
-                *k = r.as_ref().to_os_string();
+                let r = value(k.as_str());
+                *k = r.as_ref().to_string();
             })
             .or_default();
     }
 
-    pub fn include_impure_env(&mut self, env: impl AsRef<OsStr>) {
-        self.impure_env.insert(env.as_ref().to_os_string());
+    pub fn include_impure_env(&mut self, env: impl AsRef<str>) {
+        self.impure_env.insert(env.as_ref().to_string());
     }
 
-    pub fn impure_env_iter(&self) -> impl ExactSizeIterator<Item = &OsStr> {
-        self.impure_env.iter().map(|v| v.as_os_str())
+    pub fn impure_env_iter(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.impure_env.iter().map(|v| v.as_str())
     }
 
     pub fn add_output(&mut self, key: OutputName) {

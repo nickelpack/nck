@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::linux::channel::PendingChannel;
+use crate::build::linux::channel::PendingChannel;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SandboxRequest {}

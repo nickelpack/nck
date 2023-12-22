@@ -18,11 +18,7 @@ use rand::Rng;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
-use crate::{
-    settings::TMP_DIRECTORY,
-    spec_builder::{PackageReference, SpecBuilder},
-    string_types::Base32,
-};
+use crate::string_types::Base32;
 
 use self::url_types::{Error, Hash, Result, UrlValue};
 
@@ -31,9 +27,7 @@ pub mod url_types;
 static SRC_PACKAGE_NAME: LazyLock<PackageName> = LazyLock::new(|| "src".parse().unwrap());
 static DEFAULT_OUTPUT: LazyLock<OutputName> = LazyLock::new(|| "out".parse().unwrap());
 
-type AppState = Arc<super::AppState>;
-
-pub async fn create_formula(
+pub async fn create_spec(
     State(state): State<AppState>,
     Path(name): Path<UrlValue<PackageName>>,
 ) -> Result<Response> {

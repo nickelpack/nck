@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use nix::sched::CloneFlags;
 
-use crate::runtime::linux::{
+use crate::build::linux::{
     channel::{self, AsyncChannel, PendingChannel},
     fork,
     user_ns::{LinuxIdMapping, UserNamespaceConfig},
@@ -25,6 +25,10 @@ pub fn main_process() -> anyhow::Result<PendingController> {
     })
 }
 
+/// A controller that has not been activated.
+///
+/// This primarily exists to avoid interacting with tokio prior to creating the zygote. This is to keep the address
+/// space relatively small so that zygote clones are fast.
 #[derive(Debug)]
 pub struct PendingController {
     _zygote: ChildProcess,

@@ -4,7 +4,7 @@ use anyhow::bail;
 use nix::sched::CloneFlags;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::linux::{
+use crate::build::linux::{
     channel::{self, ChannelError, PendingChannel},
     fork,
     user_ns::UserNamespaceConfig,
@@ -50,7 +50,7 @@ pub fn zygote_process(peer: PendingChannel<ZygoteResponse, ZygoteRequest>) -> an
                 Ok(_) => peer.send(ZygoteResponse::SpawnSuccess)?,
                 Err(error) => {
                     tracing::error!(?error, "failed to spawn supervisor process");
-                    peer.send(ZygoteResponse::SpawnSuccess)?;
+                    peer.send(ZygoteResponse::SpawnFailure)?;
                 }
             },
         }

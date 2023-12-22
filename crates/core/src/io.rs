@@ -124,6 +124,13 @@ impl TempFile {
     }
 
     pub async fn new_in(parent: impl AsRef<Path>) -> std::io::Result<(Self, File)> {
+        Self::new_with_side_effect_in(parent, |_| {}).await
+    }
+
+    pub async fn new_with_side_effect_in(
+        parent: impl AsRef<Path>,
+        mut f: impl FnMut(&Path),
+    ) -> std::io::Result<(Self, File)> {
         const MAX_RETRIES: u32 = 1024;
         let parent = parent.as_ref();
         tokio::fs::create_dir_all(parent).await?;
@@ -153,6 +160,7 @@ impl TempFile {
                 suffix
             );
             let path = parent.join(name);
+            f(path.as_path());
             match options.open(path.as_path()).await {
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     continue;

@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::{OsStr, OsString},
     fmt::Display,
     path::{Path, PathBuf},
     str::FromStr,
@@ -36,9 +35,9 @@ impl<'a> SpecFile<'a> {
 pub struct Spec {
     name: PackageName,
     entry: PathBuf,
-    args: Vec<OsString>,
-    env: BTreeMap<OsString, OsString>,
-    impure_env: BTreeSet<OsString>,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    impure_env: BTreeSet<String>,
     outputs: BTreeMap<OutputName, PathBuf>,
     copy: BTreeMap<PathBuf, (PathBuf, bool)>,
 }
