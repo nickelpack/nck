@@ -1,0 +1,13 @@
+[package]
+name = "archive"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nck-core.workspace = true
+
+blake3.workspace = true
+serde.workspace = true
+tokio = {workspace = true, default-features = false, features = ["fs", "io-util"]}
+bitflags.workspace = true
+

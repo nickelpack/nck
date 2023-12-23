@@ -1,11 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    fmt::Display,
     path::PathBuf,
 };
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub trait DeterministicHasher: Sized {
     type Result;
@@ -98,8 +98,33 @@ pub enum SupportedHasher {
 }
 
 impl SupportedHasher {
+    pub fn from_id(id: u8) -> Option<Self> {
+        match id {
+            1 => Some(Self::blake3()),
+            _ => None,
+        }
+    }
+
+    pub fn id(&self) -> u8 {
+        match self {
+            Self::Blake3(_) => 1,
+        }
+    }
+
     pub fn blake3() -> Self {
         Self::Blake3(blake3::Hasher::new())
+    }
+
+    pub fn update(&mut self, bytes: impl AsRef<[u8]>) {
+        match self {
+            Self::Blake3(hasher) => hasher.update(bytes.as_ref()),
+        };
+    }
+
+    pub fn finalize(self) -> SupportedHash {
+        match self {
+            Self::Blake3(hasher) => SupportedHash::Blake3(*hasher.finalize().as_bytes()),
+        }
     }
 }
 
@@ -107,15 +132,11 @@ impl DeterministicHasher for SupportedHasher {
     type Result = SupportedHash;
 
     fn update(&mut self, bytes: &[u8]) {
-        match self {
-            Self::Blake3(hasher) => hasher.update(bytes),
-        };
+        SupportedHasher::update(self, bytes)
     }
 
     fn finalize(self) -> Self::Result {
-        match self {
-            Self::Blake3(hasher) => SupportedHash::Blake3(*hasher.finalize().as_bytes()),
-        }
+        SupportedHasher::finalize(self)
     }
 }
 
@@ -203,6 +224,37 @@ impl DeterministicHash for bool {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SupportedHash {
     Blake3([u8; 32]),
+}
+
+#[derive(Debug, Error)]
+pub enum FromIdError {
+    #[error("unknown hash type {:x}", _0)]
+    UnknownType(u8),
+    #[error("invalid hash length")]
+    InvalidLength { expected: usize, actual: usize },
+}
+
+impl SupportedHash {
+    pub fn from_id(id: u8, buffer: impl AsRef<[u8]>) -> Result<Self, FromIdError> {
+        let buffer = buffer.as_ref();
+        let actual = buffer.len();
+        match id {
+            1 => TryInto::<[u8; 32]>::try_into(buffer)
+                .map_err(|_| FromIdError::InvalidLength {
+                    expected: 32,
+                    actual,
+                })
+                .map(Self::Blake3),
+
+            _ => Err(FromIdError::UnknownType(id)),
+        }
+    }
+
+    pub fn as_id_and_bytes(&self) -> (u8, &[u8]) {
+        match self {
+            SupportedHash::Blake3(v) => (1, v),
+        }
+    }
 }
 
 impl SupportedHash {
