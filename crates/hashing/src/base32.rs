@@ -1,26 +1,11 @@
 // A direct copy of: https://github.com/andreasots/base32/tree/master
 // except with lowercase and a fixed alphabet. See BASE32-LICENSE
 
-use std::{fmt::Display, io::Write};
+use std::{io::Write, str::FromStr};
 
-use bytes::BytesMut;
-
-use crate::{pool::Pooled, BUFFER_POOL};
+use thiserror::Error;
 
 const ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz234567";
-
-struct HackToUseStdFmtDisplay<'a>(&'a [u8]);
-
-impl<'a> Display for HackToUseStdFmtDisplay<'a> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        encode_into(self.0, f)
-    }
-}
-
-pub fn encode(data: impl AsRef<[u8]>) -> String {
-    let data = data.as_ref();
-    format!("{}", HackToUseStdFmtDisplay(data))
-}
 
 pub fn encode_into(
     data: impl AsRef<[u8]>,
@@ -83,15 +68,6 @@ fn calculate_data_length(data: impl AsRef<[u8]>) -> usize {
     unpadded_data_length * 5 / 8
 }
 
-pub fn decode(data: impl AsRef<[u8]>) -> std::io::Result<Pooled<'static, BytesMut>> {
-    let data = data.as_ref();
-    let length = calculate_data_length(data);
-    let mut buf = BUFFER_POOL.take();
-    buf.resize(length, 0u8);
-    decode_into(data, &mut &mut buf[..])?;
-    Ok(buf)
-}
-
 pub fn decode_into(data: impl AsRef<[u8]>, dest: &mut impl Write) -> std::io::Result<usize> {
     let data = data.as_ref();
     let output_length = calculate_data_length(data);
@@ -125,10 +101,58 @@ pub fn decode_into(data: impl AsRef<[u8]>, dest: &mut impl Write) -> std::io::Re
     Ok(wrote)
 }
 
+pub(crate) struct Base32<const SIZE: usize>(pub [u8; SIZE]);
+
+impl<const SIZE: usize> Default for Base32<SIZE> {
+    fn default() -> Self {
+        Self([0u8; SIZE])
+    }
+}
+
+impl<const SIZE: usize> From<[u8; SIZE]> for Base32<SIZE> {
+    fn from(value: [u8; SIZE]) -> Self {
+        Self(value)
+    }
+}
+
+impl<const SIZE: usize> From<&[u8; SIZE]> for Base32<SIZE> {
+    fn from(value: &[u8; SIZE]) -> Self {
+        Self(*value)
+    }
+}
+
+impl<const SIZE: usize> std::fmt::Debug for Base32<SIZE> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        encode_into(self.0, f)
+    }
+}
+
+impl<const SIZE: usize> std::fmt::Display for Base32<SIZE> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        encode_into(self.0, f)
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("expected base32 of {} bytes", _0)]
+pub(crate) struct InvalidBase32(usize);
+
+impl<const SIZE: usize> FromStr for Base32<SIZE> {
+    type Err = InvalidBase32;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let mut result = [0u8; SIZE];
+        if decode_into(s, &mut &mut result[..]).map_err(|_| InvalidBase32(SIZE))? != SIZE {
+            return Err(InvalidBase32(SIZE));
+        }
+        Ok(Self(result))
+    }
+}
+
 #[cfg(test)]
 #[allow(dead_code, unused_attributes)]
 mod test {
-    use super::{decode, decode_into, encode};
+    use super::{decode_into, encode_into};
     use std::{self, io::ErrorKind};
 
     #[derive(Clone)]
@@ -142,16 +166,35 @@ mod test {
         }
     }
 
+    struct HackToUseStdFmtDisplay<'a>(&'a [u8]);
+
+    impl<'a> std::fmt::Display for HackToUseStdFmtDisplay<'a> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            encode_into(self.0, f)
+        }
+    }
+
+    pub fn encode(data: impl AsRef<[u8]>) -> String {
+        let data = data.as_ref();
+        format!("{}", HackToUseStdFmtDisplay(data))
+    }
+
+    fn decode(v: &str) -> std::io::Result<Vec<u8>> {
+        let mut result = Vec::new();
+        super::decode_into(v, &mut result)?;
+        Ok(result)
+    }
+
     #[test]
     fn masks_rfc4648() {
         assert_eq!(encode([0xF8, 0x3E, 0x7F, 0x83, 0xE7]), "7a7h7a7h");
         assert_eq!(encode([0x77, 0xC1, 0xF7, 0x7C, 0x1F]), "o7a7o7a7");
         assert_eq!(
-            decode("7a7H7a7h").unwrap().as_ref().as_ref(),
+            decode("7a7H7a7h").unwrap().as_slice(),
             &[0xF8, 0x3E, 0x7F, 0x83, 0xE7]
         );
         assert_eq!(
-            decode("o7a7O7a7").unwrap().as_ref().as_ref(),
+            decode("o7a7O7a7").unwrap().as_slice(),
             &[0x77, 0xC1, 0xF7, 0x7C, 0x1F]
         );
         assert_eq!(encode([0xF8, 0x3E, 0x7F, 0x83]), "7a7h7ay");
@@ -186,11 +229,11 @@ mod test {
         assert_eq!(encode([0xF8, 0x3E, 0x7F, 0x83, 0xE7]), "7a7h7a7h");
         assert_eq!(encode([0x77, 0xC1, 0xF7, 0x7C, 0x1F]), "o7a7o7a7");
         assert_eq!(
-            decode("7a7H7a7h").unwrap().as_ref().as_ref(),
+            decode("7a7H7a7h").unwrap().as_slice(),
             &[0xF8, 0x3E, 0x7F, 0x83, 0xE7]
         );
         assert_eq!(
-            decode("o7a7O7a7").unwrap().as_ref().as_ref(),
+            decode("o7a7O7a7").unwrap().as_slice(),
             &[0x77, 0xC1, 0xF7, 0x7C, 0x1F]
         );
         assert_eq!(encode([0xF8, 0x3E, 0x7F, 0x83]), "7a7h7ay");

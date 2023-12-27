@@ -1,5 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::VecDeque,
     marker::PhantomData,
     os::{
@@ -10,7 +10,7 @@ use std::{
 };
 
 use bytes::BytesMut;
-use nck_core::pool::Pooled;
+use nck_io::pool::Pooled;
 use parking_lot::Mutex;
 
 pub use async_impl::AsyncChannel;
@@ -281,7 +281,7 @@ fn deserialize<'de, T: Deserialize<'de>>(bytes: &'de [u8], q: FdQueue) -> Result
 }
 
 mod async_impl {
-    use nck_core::BUFFER_POOL;
+    use nck_io::pool::BUFFER_POOL;
     use serde::{Deserialize, Serialize};
     use std::{
         io::{IoSlice, IoSliceMut},
@@ -476,7 +476,7 @@ mod async_impl {
 }
 
 mod sync_impl {
-    use nck_core::BUFFER_POOL;
+    use nck_io::pool::BUFFER_POOL;
     use parking_lot::Mutex;
     use serde::{Deserialize, Serialize};
     use std::io::{IoSlice, IoSliceMut, Write};

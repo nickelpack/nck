@@ -1,6 +1,9 @@
-use std::{cell::RefCell, time::Duration};
+use std::{
+    cell::RefCell,
+    ops::Add,
+    time::{Duration, Instant},
+};
 
-use nck_core::io::Timeout;
 use nix::{
     sys::{
         signal::Signal,
@@ -48,7 +51,7 @@ impl ChildProcess {
     }
 
     pub fn inner(&self) -> Pid {
-        self.0.borrow().unwrap().clone()
+        self.0.borrow().unwrap()
     }
 
     fn new(pid: Pid) -> Self {
@@ -90,7 +93,7 @@ impl ChildProcess {
                     .unwrap_or(nix::Error::EFAULT)),
             },
             Err(nix::Error::ESRCH) => Ok(true),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(e),
         }
     }
 
@@ -106,24 +109,28 @@ impl ChildProcess {
         }
 
         tracing::trace!("waiting for process to exit");
-        match CHILD_DROP_WAIT.timeout(|| Self::poll(pid)) {
-            Ok(_) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(error) => {
-                return Err(error
-                    .raw_os_error()
-                    .map(nix::Error::from_i32)
-                    .unwrap_or(nix::Error::EFAULT))
+        let end = Instant::now().add(CHILD_DROP_WAIT);
+
+        loop {
+            match Self::poll(pid) {
+                Ok(_) => return Ok(()),
+                Err(err) => match err.kind() {
+                    std::io::ErrorKind::WouldBlock if end > Instant::now() => {
+                        std::thread::sleep(Duration::from_millis(15))
+                    }
+                    std::io::ErrorKind::WouldBlock => break,
+                    _ => {
+                        return Err(err
+                            .raw_os_error()
+                            .map(nix::Error::from_i32)
+                            .unwrap_or(nix::Error::EFAULT))
+                    }
+                },
             }
         }
 
         tracing::warn!("process has taken too long to exit, sending SIGKILL",);
         Self::kill(pid, Signal::SIGKILL)?;
         Ok(())
-    }
-
-    /// Attempts to kill the child process.
-    pub fn try_drop(mut self) -> nix::Result<()> {
-        self.try_drop_impl()
     }
 }

@@ -1,14 +1,18 @@
+#![feature(never_type)]
+#![feature(core_io_borrowed_buf)]
+#![feature(read_buf)]
+
+mod read;
+mod write;
+
 use std::{
-    fs::File,
-    io::{Read, Seek, Write},
-    path::PathBuf,
+    io::ErrorKind,
+    path::{Path, PathBuf},
 };
 
-use nck_core::{
-    hashing::{SupportedHash, SupportedHasher},
-    BUFFER_POOL,
-};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use nck_hashing::SupportedHash;
+pub use read::*;
+pub use write::*;
 
 const ENTRY_DATA: u8 = 1;
 const ENTRY_ENTRY: u8 = 2;
@@ -17,15 +21,21 @@ const TYPE_DATA: u8 = 1;
 const TYPE_LINK: u8 = 2;
 const TYPE_DIR: u8 = 3;
 
+#[cfg(not(test))]
 const MAX_LENGTH: usize = u16::MAX as usize;
 
+#[cfg(test)]
+const MAX_LENGTH: usize = 32;
+
 bitflags::bitflags! {
+    #[derive(Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
     pub struct EntryFlags: u16 {
         const EXECUTABLE = 0b0000_0000_0000_0001;
     }
 }
 
 /// The target for a file entry.
+#[derive(Debug, PartialEq, Eq)]
 pub enum EntryTarget {
     /// The entry contains data, which is referred to by hash.
     Data(SupportedHash, EntryFlags),
@@ -36,117 +46,60 @@ pub enum EntryTarget {
 }
 
 /// A single entry.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Entry {
     path: PathBuf,
     target: EntryTarget,
 }
 
-pub fn write_data(
-    reader: &mut impl Read,
-    writer: &mut impl Write,
-    mut hasher: SupportedHasher,
-) -> std::io::Result<SupportedHash> {
-    let mut buffer = BUFFER_POOL.take();
-
-    writer.write_all(&[ENTRY_DATA])?;
-    loop {
-        let len = reader.read(&mut buffer[..])?;
-        if len == 0 {
-            break;
-        }
-
-        let mut bytes = &buffer[..len];
-        hasher.update(bytes);
-
-        while !bytes.is_empty() {
-            let to_write = MAX_LENGTH.min(bytes.len());
-
-            writer.write_all(&(to_write as u16).to_be_bytes())?;
-            writer.write_all(&bytes[..to_write])?;
-            bytes = &bytes[to_write..];
+impl Entry {
+    pub fn new(path: impl AsRef<Path>, target: EntryTarget) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            target,
         }
     }
 
-    // Length of zero terminates the data.
-    writer.write_all(&0u16.to_be_bytes())?;
+    pub fn data(path: impl AsRef<Path>, hash: SupportedHash, flags: Option<EntryFlags>) -> Self {
+        Self::new(path, EntryTarget::Data(hash, flags.unwrap_or_default()))
+    }
 
-    let hash = hasher.finalize();
-    let (id, bytes) = hash.as_id_and_bytes();
-    writer.write_all(&[id])?;
-    writer.write_all(bytes)?;
+    pub fn link(
+        path: impl AsRef<Path>,
+        source: impl AsRef<Path>,
+        flags: Option<EntryFlags>,
+    ) -> Self {
+        Self::new(
+            path,
+            EntryTarget::Link(source.as_ref().to_path_buf(), flags.unwrap_or_default()),
+        )
+    }
 
-    Ok(hash)
+    pub fn directory(path: impl AsRef<Path>) -> Self {
+        Self::new(path, EntryTarget::Directory)
+    }
 }
 
-pub async fn write_data_async(
-    reader: &mut (impl AsyncRead + Unpin),
-    writer: &mut (impl AsyncWrite + Unpin),
-    mut hasher: SupportedHasher,
-) -> std::io::Result<SupportedHash> {
-    let mut buffer = BUFFER_POOL.take();
-
-    writer.write_all(&[ENTRY_DATA]).await?;
-    loop {
-        let len = reader.read(&mut buffer[..]).await?;
-        if len == 0 {
-            break;
-        }
-
-        let mut bytes = &buffer[..len];
-        hasher.update(bytes);
-
-        while !bytes.is_empty() {
-            let to_write = MAX_LENGTH.min(bytes.len());
-
-            writer.write_all(&(to_write as u16).to_be_bytes()).await?;
-            writer.write_all(&bytes[..to_write]).await?;
-            bytes = &bytes[to_write..];
-        }
+fn hash_data(hash: &SupportedHash) -> (u8, &[u8]) {
+    match hash {
+        SupportedHash::Blake3(h) => (1, &h[..]),
     }
-
-    // Length of zero terminates the data.
-    writer.write_all(&0u16.to_be_bytes()).await?;
-
-    let hash = hasher.finalize();
-    let (id, bytes) = hash.as_id_and_bytes();
-    writer.write_all(&[id]).await?;
-    writer.write_all(bytes).await?;
-
-    Ok(hash)
 }
 
-pub fn write_entry(entry: Entry, writer: &mut impl Write) -> std::io::Result<()> {
-    writer.write_all(&[ENTRY_ENTRY])?;
-
-    let path = entry.path.as_os_str().as_encoded_bytes();
-    write_length_prefixed(path, writer)?;
-
-    match entry.target {
-        EntryTarget::Data(hash, flags) => {
-            let (id, bytes) = hash.as_id_and_bytes();
-            writer.write_all(&[TYPE_DATA, id])?;
-            writer.write_all(bytes)?;
-            writer.write_all(&flags.bits().to_be_bytes())?;
-        }
-        EntryTarget::Link(dest, flags) => {
-            let path = dest.as_os_str().as_encoded_bytes();
-            writer.write_all(&[TYPE_LINK])?;
-            write_length_prefixed(path, writer)?;
-            writer.write_all(&flags.bits().to_be_bytes())?;
-        }
-        EntryTarget::Directory => {
-            writer.write_all(&[TYPE_DIR])?;
-        }
+fn hash_length(hash: u8) -> std::io::Result<usize> {
+    match hash {
+        1 => Ok(32),
+        _ => Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            format!("unknown hash type '{hash:x}'"),
+        )),
     }
-
-    Ok(())
 }
 
-fn write_length_prefixed(buf: &[u8], writer: &mut impl Write) -> Result<(), std::io::Error> {
-    if buf.len() > MAX_LENGTH {
-        return Err(std::io::ErrorKind::InvalidInput.into());
+fn create_hash(hash: u8, data: &[u8]) -> SupportedHash {
+    match hash {
+        1 => SupportedHash::Blake3(data.try_into().unwrap()),
+        // Validated by calling hash_length first
+        _ => unreachable!(),
     }
-    writer.write_all(&(buf.len() as u16).to_be_bytes())?;
-    writer.write_all(buf)?;
-    Ok(())
 }

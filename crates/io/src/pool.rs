@@ -13,8 +13,37 @@ use std::{
 
 mod owned_pooled_item;
 mod pooled_item;
+use bytes::BytesMut;
 pub use owned_pooled_item::OwnedPooled;
 pub use pooled_item::Pooled;
+
+const MB: usize = 131072;
+const MAX_TOTAL_BUFFERS: usize = 128 * MB;
+const MAX_SINGLE_BUFFER: usize = 16 * MB;
+const DEFAULT_BUFFER_LEN: usize = 16384;
+
+static CURRENT_SIZE: AtomicUsize = AtomicUsize::new(0);
+pub static BUFFER_POOL: Pool<'static, 128, BytesMut> =
+    Pool::new(&|| BytesMut::with_capacity(DEFAULT_BUFFER_LEN))
+        .with_max_search(16)
+        .with_take_hook(&|v| {
+            CURRENT_SIZE.fetch_sub(v.capacity(), std::sync::atomic::Ordering::Release);
+            v
+        })
+        .with_return_hook(&|mut v| {
+            let capacity = v.capacity();
+            if capacity > MAX_SINGLE_BUFFER
+                || CURRENT_SIZE.load(std::sync::atomic::Ordering::Acquire) + capacity
+                    > MAX_TOTAL_BUFFERS
+            {
+                None
+            } else {
+                // It's a soft limit.
+                CURRENT_SIZE.fetch_add(capacity, std::sync::atomic::Ordering::Release);
+                v.clear();
+                Some(v)
+            }
+        });
 
 const EMPTY: u8 = 0;
 const WRITING: u8 = 1;
@@ -26,12 +55,6 @@ const DESTROYED: u8 = 4;
 pub trait PoolReturn<T>: Sync {
     /// Returns a value to the pool.
     fn return_value(&self, value: T);
-}
-
-impl<T: Send> PoolReturn<T> for flume::Sender<T> {
-    fn return_value(&self, value: T) {
-        self.send(value).ok();
-    }
 }
 
 struct PoolState<'a, T, const CAPACITY: usize> {

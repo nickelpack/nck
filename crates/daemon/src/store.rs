@@ -1,29 +1,34 @@
 use std::{
+    hash::Hash,
+    io::ErrorKind,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{atomic::AtomicUsize, Arc, LazyLock},
 };
 
 use dashmap::{mapref::entry::Entry, DashMap};
-use nck_core::{hashing::SupportedHash, io::TempFile};
-use tokio::{fs::File, sync::Mutex};
+use nck_hashing::{StableHashExt, SupportedHash, SupportedHasher};
+use nck_io::fs::TempFile;
+use tokio::{
+    fs::{File, OpenOptions},
+    io::AsyncWriteExt,
+};
 
 use crate::{
-    build::linux::Controller,
+    build::linux::{Controller, Sandbox},
     settings::{ROOT_DIRECTORY, STORE_DIRECTORY},
+    spec::Spec,
 };
 
 pub static FILES_DIRECTORY: LazyLock<PathBuf> = LazyLock::new(|| STORE_DIRECTORY.join("files"));
 pub static TMP_DIRECTORY: LazyLock<PathBuf> = LazyLock::new(|| ROOT_DIRECTORY.join("tmp"));
 
-fn supported_hash_to_string(hash: &SupportedHash) -> String {
-    crate::string_types::Hash::new(*hash).to_string()
-}
-
 #[derive(Debug)]
 struct StoreState {
-    controller: Mutex<Controller>,
+    controller: Controller,
     locks: DashMap<PathBuf, AtomicUsize>,
+    builds: DashMap<usize, Build>,
+    counter: AtomicUsize,
 }
 
 impl StoreState {
@@ -68,13 +73,15 @@ impl Store {
         results.1?;
 
         Ok(Self(Arc::new(StoreState {
-            controller: Mutex::new(controller),
+            controller,
             locks: DashMap::new(),
+            builds: DashMap::new(),
+            counter: AtomicUsize::new(0),
         })))
     }
 
     pub async fn get_file(&self, hash: &SupportedHash) -> std::io::Result<StoreLock> {
-        let path = FILES_DIRECTORY.join(supported_hash_to_string(hash));
+        let path = FILES_DIRECTORY.join(hash.to_string());
         let dec = DecrementLock::new(path.clone(), self.0.clone());
 
         let file = tokio::fs::OpenOptions::new()
@@ -88,6 +95,41 @@ impl Store {
 
     pub async fn create_file(&self) -> std::io::Result<PendingFile> {
         PendingFile::new(self.0.clone()).await
+    }
+
+    pub async fn start(&self, spec: Spec, locks: Vec<StoreLock>) -> anyhow::Result<()> {
+        let hash = spec.hash(SupportedHasher::blake3());
+        let name = format!("{}-{}", spec.name(), &hash);
+
+        let output_path = STORE_DIRECTORY.join(format!("{}.spec", name));
+
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(output_path.as_path())
+            .await
+        {
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(other) => Err(other)?,
+            Ok(mut file) => {
+                let s = rmp_serde::to_vec(&spec)?;
+                //let s = toml::to_string_pretty(&spec)?;
+                file.write_all(s.as_slice()).await?;
+            }
+        }
+        let sandbox = self.0.controller.spawn_async(output_path.as_path()).await?;
+        let build = Build {
+            sandbox,
+            locks: locks.into_iter().map(|v| v.dec).collect(),
+        };
+
+        let id = self
+            .0
+            .counter
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.builds.insert(id, build);
+
+        Ok(())
     }
 }
 
@@ -125,6 +167,20 @@ pub struct StoreLock {
     dec: DecrementLock,
 }
 
+impl PartialEq for StoreLock {
+    fn eq(&self, other: &Self) -> bool {
+        self.dec.path == other.dec.path
+    }
+}
+
+impl Eq for StoreLock {}
+
+impl Hash for StoreLock {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.dec.path.hash(state)
+    }
+}
+
 impl StoreLock {
     pub fn as_path(&self) -> &Path {
         self.dec.path.as_ref().unwrap().as_path()
@@ -159,7 +215,7 @@ impl PendingFile {
 
     /// Writes the file into the store.
     pub async fn complete(self, hash: &SupportedHash) -> std::io::Result<StoreLock> {
-        let path = FILES_DIRECTORY.join(supported_hash_to_string(hash));
+        let path = FILES_DIRECTORY.join(hash.to_string());
 
         let dec = DecrementLock::new(path.clone(), self.state.clone());
         tokio::fs::copy(self.lock.as_path(), path.as_path()).await?;
@@ -187,4 +243,10 @@ impl DerefMut for PendingFile {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.lock.file
     }
+}
+
+#[derive(Debug)]
+pub struct Build {
+    sandbox: Sandbox,
+    locks: Vec<DecrementLock>,
 }

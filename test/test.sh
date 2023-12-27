@@ -18,47 +18,39 @@ encode() {
   jq -rn --arg x "$0" '$x|@uri'
 }
 
-copy_file() {
+extract_file() {
   local source=$(upload_file "$1")
   local dest=$2
-  local mode=$3
-  # local encoded=$(encode "$dest")
-  # local result=$(req -X POST "${host}${formula_url}/copy/${source}?to=$dest&executable=$mode" | sed 's#\r##g')
+  local de=$3
+  local encoded=$(encode "$dest")
+  local result=$(
+    req -X POST "${host}${formula_url}/action/extract" \
+      --form "source=${source}" \
+      --form "dest=${dest}" \
+      --form "compression=${de}" \
+      | sed 's#\r##g'
+  )
+  echo "$source: $result"
 }
 
-set_env() {
-  req -X POST "${host}${formula_url}/env/$1" --data-binary "$2" -H "content-type: text/plain" | sed 's#\r##g'
-}
-
-build() {
-  req -X POST "${host}${formula_url}/build/$1" | sed 's#\r##g'
-}
-
-create_formula_response=$(req -X POST $host/api/1/spec/glibc-2.38 | sed 's#\r##g')
+create_formula_response=$(req -X POST "$host/api/1/spec/glibc-2.38?output=out" | sed 's#\r##g')
+echo "$create_formula_response"
 formula_url=$(awk -v FS=": " '/^location/{print $2}' <<< "$create_formula_response")
-echo "-- $formula_url --"
+echo "-- $formula_url --" 1>&2
 
-for file in "support/"*; do
-  echo "$file"
-  copy_file "$file" "/$file" true
-done
+extract_file "rootfs.nck.zst" "/" "zstd"
 
-for file in "src/"* "rootfs.tar"; do
-  echo "$file"
-  copy_file "$file" "/$file" false
-done
-
-echo "#!/support/ash" > script
+echo "#!/bin/bash" > script
 echo "/support/tar -xvf /rootfs.tar" >> script
 
-copy_file "$pwd/script" "/support/run" true
+req -X POST "${host}${formula_url}/action/execute" \
+  --form "bin=/support/run" \
+  --form "env[TMP]=/tmp" \
+  --form "env[TMPDIR]=/tmp" \
+  --form "env[TEMP]=/tmp" \
+  --form "env[TEMPDIR]=/tmp" \
+  --form "env[HOME]=/no-home" \
+  --form "env[TERM]=xterm-256color" \
+  --form "env[PATH]=/bin:/usr/bin:/sbin:/usr/sbin"
 
-# set_env "TMP" "/tmp"
-# set_env "TMPDIR" "/tmp"
-# set_env "TEMP" "/tmp"
-# set_env "TEMPDIR" "/tmp"
-# set_env "HOME" "/no-home"
-# set_env "TERM" "xterm-256color"
-# set_env "PATH" "/bin:/usr/bin:/sbin:/usr/sbin"
-
-# build "support/run"
+req -X POST "${host}${formula_url}/run"

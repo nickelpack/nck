@@ -1,56 +1,239 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
+    ffi::OsString,
     fmt::Display,
-    path::{Path, PathBuf},
+    path::PathBuf,
     str::FromStr,
 };
 
-use nck_core::hashing::{DeterministicHash, DeterministicHasher};
+use nck_hashing::{StableHash, StableHasher, StableHasherExt, SupportedHash};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[derive(Debug)]
-pub struct SpecFile<'a> {
-    source: &'a Path,
-    dest: &'a Path,
-    executable: bool,
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
+pub enum CompressionAlgorithm {
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "zstd")]
+    Zstd,
 }
 
-impl<'a> SpecFile<'a> {
-    pub fn source(&self) -> &'a Path {
-        self.source
-    }
+#[derive(Debug, Error)]
+#[error("unknown compression algorithm")]
+pub struct UnknownCompressionAlgorithm;
 
-    pub fn dest(&self) -> &'a Path {
-        self.dest
-    }
+impl FromStr for CompressionAlgorithm {
+    type Err = UnknownCompressionAlgorithm;
 
-    pub fn executable(&self) -> bool {
-        self.executable
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" | "" => Ok(CompressionAlgorithm::None),
+            "zstd" => Ok(CompressionAlgorithm::Zstd),
+            _ => Err(UnknownCompressionAlgorithm),
+        }
+    }
+}
+
+impl Display for CompressionAlgorithm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CompressionAlgorithm::Zstd => f.write_str("zstd"),
+            CompressionAlgorithm::None => f.write_str("none"),
+        }
+    }
+}
+
+impl StableHash for CompressionAlgorithm {
+    fn update<H: StableHasher>(&self, h: &mut H) {
+        match self {
+            CompressionAlgorithm::None => h.update_hash(0u8),
+            CompressionAlgorithm::Zstd => h.update_hash(1u8),
+        };
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+enum WireAction {
+    #[serde(rename = "extract")]
+    Extract {
+        hash: String,
+        destination: PathBuf,
+        compression: CompressionAlgorithm,
+    },
+    #[serde(rename = "execute")]
+    Execute {
+        path: PathBuf,
+        args: Vec<PathBuf>,
+        environment: BTreeMap<PathBuf, PathBuf>,
+    },
+}
+
+impl From<Action> for WireAction {
+    fn from(value: Action) -> Self {
+        match value {
+            Action::Extract(hash, destination, compression) => WireAction::Extract {
+                hash: hash.to_string(),
+                destination,
+                compression,
+            },
+            Action::Execute(path, args, environment) => WireAction::Execute {
+                path,
+                args: args.into_iter().map(|f| f.into()).collect(),
+                environment: environment
+                    .into_iter()
+                    .map(|(k, v)| (k.into(), v.into()))
+                    .collect(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+enum ActionDeserializationError {
+    #[error("duplicate environment variable: {:?}", _0)]
+    DuplicateEnvironment(OsString),
+    #[error("invalid hash: {:?}", _0)]
+    InvalidHash(String),
+}
+
+impl TryFrom<WireAction> for Action {
+    type Error = ActionDeserializationError;
+
+    fn try_from(value: WireAction) -> Result<Self, Self::Error> {
+        match value {
+            WireAction::Extract {
+                hash,
+                destination,
+                compression,
+            } => {
+                let hash = hash
+                    .parse()
+                    .map_err(|_| ActionDeserializationError::InvalidHash(hash))?;
+                Ok(Action::Extract(hash, destination, compression))
+            }
+            WireAction::Execute {
+                path,
+                args,
+                environment,
+            } => {
+                let mut env = BTreeMap::new();
+                for (k, v) in environment {
+                    let k = k.into_os_string();
+                    let v = v.into_os_string();
+                    if env.insert(k.clone(), v).is_some() {
+                        return Err(ActionDeserializationError::DuplicateEnvironment(k));
+                    }
+                }
+                Ok(Action::Execute(
+                    path,
+                    args.into_iter().map(|f| f.into_os_string()).collect(),
+                    env,
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WireSpec {
+    name: String,
+    outputs: HashSet<String>,
+    actions: Vec<WireAction>,
+}
+
+impl From<Spec> for WireSpec {
+    fn from(value: Spec) -> Self {
+        WireSpec {
+            name: value.name.0,
+            outputs: value.outputs.into_iter().map(|k| k.0).collect(),
+            actions: value
+                .actions
+                .into_iter()
+                .map(Into::<WireAction>::into)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+enum SpecDeserializationError {
+    #[error("invalid package name: {:?}", _0)]
+    PackageName(String),
+    #[error("invalid output name: {:?}", _0)]
+    OutputName(String),
+    #[error("invalid action: {:?}", _0)]
+    Action(ActionDeserializationError),
+}
+
+impl TryFrom<WireSpec> for Spec {
+    type Error = SpecDeserializationError;
+
+    fn try_from(value: WireSpec) -> Result<Self, Self::Error> {
+        let name = value
+            .name
+            .parse()
+            .map_err(|_| SpecDeserializationError::PackageName(value.name))?;
+
+        let mut outputs = BTreeSet::new();
+        for k in value.outputs {
+            let k = k
+                .parse()
+                .map_err(|_| SpecDeserializationError::OutputName(k))?;
+            outputs.insert(k);
+        }
+
+        let mut actions = Vec::new();
+        for k in value.actions {
+            let k = k.try_into().map_err(SpecDeserializationError::Action)?;
+            actions.push(k);
+        }
+
+        Ok(Self {
+            name,
+            outputs,
+            actions,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Action {
+    Extract(SupportedHash, PathBuf, CompressionAlgorithm),
+    Execute(PathBuf, Vec<OsString>, BTreeMap<OsString, OsString>),
+}
+
+impl StableHash for Action {
+    fn update<H: StableHasher>(&self, h: &mut H) {
+        match self {
+            Action::Extract(a, b, c) => h
+                .update_hash(1u8)
+                .update_hash(a)
+                .update_hash(b)
+                .update_hash(c),
+            Action::Execute(a, b, c) => h
+                .update_hash(2u8)
+                .update_hash(a)
+                .update_hash(b)
+                .update_hash(c),
+        };
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+// #[serde(into = "WireSpec", try_from = "WireSpec")]
 pub struct Spec {
     name: PackageName,
-    entry: PathBuf,
-    args: Vec<String>,
-    env: BTreeMap<String, String>,
-    impure_env: BTreeSet<String>,
-    outputs: BTreeMap<OutputName, PathBuf>,
-    copy: BTreeMap<PathBuf, (PathBuf, bool)>,
+    outputs: BTreeSet<OutputName>,
+    actions: Vec<Action>,
 }
 
 impl Spec {
-    pub fn new(name: PackageName, entry: impl AsRef<Path>) -> Spec {
+    pub fn new(name: PackageName) -> Spec {
         Spec {
             name,
-            entry: entry.as_ref().to_path_buf(),
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            impure_env: BTreeSet::new(),
-            outputs: BTreeMap::new(),
-            copy: BTreeMap::new(),
+            outputs: BTreeSet::new(),
+            actions: Vec::new(),
         }
     }
 
@@ -58,101 +241,34 @@ impl Spec {
         &self.name
     }
 
-    pub fn entry(&self) -> &Path {
-        self.entry.as_path()
+    pub fn actions_iter(&self) -> impl ExactSizeIterator<Item = &Action> {
+        self.actions.iter()
     }
 
-    pub fn args_iter(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.args.iter().map(|v| v.as_str())
+    pub fn push_action(&mut self, action: Action) {
+        self.actions.push(action)
     }
 
-    pub fn push_arg(&mut self, arg: impl AsRef<str>) {
-        self.args.push(arg.as_ref().to_string())
-    }
-
-    pub fn push_args<S: AsRef<str>>(&mut self, arg: impl Iterator<Item = S>) {
+    pub fn push_actions<S: Into<Action>>(&mut self, arg: impl Iterator<Item = S>) {
         for item in arg {
-            self.args.push(item.as_ref().to_string())
+            self.actions.push(item.into())
         }
     }
 
-    pub fn env_iter(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
-        self.env.iter().map(|(k, v)| (k.as_str(), v.as_str()))
-    }
-
-    pub fn set_env(&mut self, key: impl AsRef<str>, value: impl AsRef<str>) {
-        let key = key.as_ref();
-        let value = value.as_ref();
-        self.env.insert(key.to_string(), value.to_string());
-    }
-
-    pub fn update_env<R: AsRef<str>>(
-        &mut self,
-        key: impl AsRef<str>,
-        value: impl FnOnce(&str) -> R,
-    ) {
-        let key = key.as_ref();
-
-        self.env
-            .entry(key.to_string())
-            .and_modify(|k| {
-                let r = value(k.as_str());
-                *k = r.as_ref().to_string();
-            })
-            .or_default();
-    }
-
-    pub fn include_impure_env(&mut self, env: impl AsRef<str>) {
-        self.impure_env.insert(env.as_ref().to_string());
-    }
-
-    pub fn impure_env_iter(&self) -> impl ExactSizeIterator<Item = &str> {
-        self.impure_env.iter().map(|v| v.as_str())
-    }
-
     pub fn add_output(&mut self, key: OutputName) {
-        self.outputs.insert(key, PathBuf::new());
+        self.outputs.insert(key);
     }
 
-    pub fn set_output(&mut self, key: OutputName, value: impl AsRef<Path>) {
-        let value = value.as_ref();
-        self.outputs.insert(key, value.to_path_buf());
-    }
-
-    pub fn outputs_iter(&self) -> impl ExactSizeIterator<Item = (&OutputName, &Path)> {
-        self.outputs.iter().map(|(k, v)| (k, v.as_path()))
-    }
-
-    pub fn copy_file(
-        &mut self,
-        source: impl AsRef<Path>,
-        dest: impl AsRef<Path>,
-        executable: bool,
-    ) {
-        let source = source.as_ref();
-        let dest = dest.as_ref();
-        self.copy
-            .insert(dest.to_path_buf(), (source.to_path_buf(), executable));
-    }
-
-    pub fn copy_iter(&self) -> impl ExactSizeIterator<Item = SpecFile<'_>> {
-        self.copy.iter().map(|(k, v)| SpecFile {
-            source: v.0.as_path(),
-            dest: k.as_path(),
-            executable: v.1,
-        })
+    pub fn outputs_iter(&self) -> impl ExactSizeIterator<Item = &OutputName> {
+        self.outputs.iter()
     }
 }
 
-impl DeterministicHash for Spec {
-    fn update<H: DeterministicHasher>(&self, h: &mut H) {
-        h.update_hash(&self.entry)
-            .update_hash(&self.args)
-            .update_hash(&self.env)
-            .update_hash(&self.impure_env)
-            .update_hash(&self.copy)
-            // This would cause a catch-22.
-            .update_iter(self.outputs.keys());
+impl StableHash for Spec {
+    fn update<H: StableHasher>(&self, h: &mut H) {
+        h.update_hash(&self.name)
+            .update_iter(self.actions.iter())
+            .update_iter(self.outputs.iter());
     }
 }
 
@@ -187,8 +303,8 @@ impl FromStr for OutputName {
     }
 }
 
-impl DeterministicHash for OutputName {
-    fn update<H: DeterministicHasher>(&self, h: &mut H) {
+impl StableHash for OutputName {
+    fn update<H: StableHasher>(&self, h: &mut H) {
         h.update_hash(&self.0);
     }
 }
@@ -235,8 +351,8 @@ impl FromStr for PackageName {
     }
 }
 
-impl DeterministicHash for PackageName {
-    fn update<H: DeterministicHasher>(&self, h: &mut H) {
+impl StableHash for PackageName {
+    fn update<H: StableHasher>(&self, h: &mut H) {
         h.update_hash(&self.0);
     }
 }

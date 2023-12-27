@@ -1,11 +1,13 @@
-use std::path::PathBuf;
+use std::{path::Path, sync::Arc};
 
 use nix::sched::CloneFlags;
+use thiserror::Error;
+use tokio::sync::Mutex;
 
 use crate::build::linux::{
-    channel::{self, AsyncChannel, PendingChannel},
+    channel::{self, AsyncChannel, ChannelError, PendingChannel, PendingChannelError},
     fork,
-    user_ns::{LinuxIdMapping, UserNamespaceConfig},
+    user_ns::{LinuxIdMapping, UserNamespaceConfig, UserNamespaceError},
 };
 
 use super::{
@@ -37,21 +39,40 @@ pub struct PendingController {
 
 impl PendingController {
     pub async fn into_controller(self) -> anyhow::Result<Controller> {
-        Ok(Controller {
+        Ok(Controller(Arc::new(Mutex::new(ControllerState {
             _zygote: self._zygote,
             channel: self.channel.into_peer_async().await?,
-        })
+        }))))
     }
 }
 
 #[derive(Debug)]
-pub struct Controller {
+struct ControllerState {
     _zygote: ChildProcess,
     channel: AsyncChannel<ZygoteRequest, ZygoteResponse>,
 }
 
+#[derive(Debug)]
+pub struct Controller(Arc<Mutex<ControllerState>>);
+
+#[derive(Debug, Error)]
+pub enum SpawnError {
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error(transparent)]
+    UserNamespace(#[from] UserNamespaceError),
+    #[error(transparent)]
+    PendingChannel(#[from] PendingChannelError),
+    #[error(transparent)]
+    Channel(#[from] ChannelError),
+    #[error("spawn failed in child process")]
+    SpawnFailed,
+}
+
 impl Controller {
-    pub async fn spawn_async(&self) -> anyhow::Result<Sandbox> {
+    pub async fn spawn_async(&self, path: impl AsRef<Path>) -> Result<Sandbox, SpawnError> {
+        let s = self.0.clone().lock_owned().await;
+
         let mut user_namespace_config = UserNamespaceConfig::new()?;
         user_namespace_config
             .uid_mappings_mut()
@@ -63,19 +84,19 @@ impl Controller {
         let (sandbox_peer, local_sandbox_peer) = channel::unix_pair()?;
         let sandbox_channel = local_sandbox_peer.into_peer_async().await?;
 
-        self.channel
+        s.channel
             .send(ZygoteRequest::Spawn {
                 user_namespace_config,
-                spec_path: PathBuf::new(),
+                spec_path: path.as_ref().to_path_buf(),
                 sandbox_peer,
             })
             .await?;
 
-        match self.channel.recv().await? {
+        match s.channel.recv().await? {
             ZygoteResponse::SpawnSuccess => Ok(Sandbox {
                 channel: sandbox_channel,
             }),
-            ZygoteResponse::SpawnFailure => Err(anyhow::anyhow!("failed to start a sandbox")),
+            ZygoteResponse::SpawnFailure => Err(SpawnError::SpawnFailed),
         }
     }
 }

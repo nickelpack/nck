@@ -1,13 +1,19 @@
 [package]
-name = "archive"
+name = "nck-archive"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nck-core.workspace = true
+nck-io.workspace = true
+nck-hashing.workspace = true
 
 blake3.workspace = true
 serde.workspace = true
 tokio = {workspace = true, default-features = false, features = ["fs", "io-util"]}
 bitflags.workspace = true
+bytes.workspace = true
 
+[dev-dependencies]
+tokio = {workspace = true, default-features = false, features = ["fs", "io-util", "rt", "macros"]}
+anyhow.workspace = true
+pretty_assertions.workspace = true

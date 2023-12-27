@@ -3,3 +3,5 @@ src/
 support/
 script
 rootfs.tar
+rootfs.nck
+rootfs.nck.zst

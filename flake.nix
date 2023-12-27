@@ -32,8 +32,8 @@
       in {
         packages.default = outputs.nip.packages.release;
         devShells.default = outputs.nickelpack.devShell.overrideAttrs (old: {
-          packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb cargo-udeps curl jq];
-          RUST_LOG = "info,nck_sandbox=trace,nck_core=trace,nck_daemon=trace";
+          packages = with pkgs; (old.packages or []) ++ [cargo-expand gdb cargo-udeps curl jq zstd];
+          RUST_LOG = "trace,nck_sandbox=trace,nck_core=trace,nck_daemon=trace";
           shellHook = ''
             declare -a parts
             try_find() {
