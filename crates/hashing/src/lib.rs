@@ -1,8 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     os::unix::prelude::OsStrExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 mod base32;
@@ -135,6 +135,13 @@ impl StableHash for OsString {
     }
 }
 
+impl StableHash for &OsStr {
+    #[inline(always)]
+    fn update<H: StableHasher>(&self, h: &mut H) {
+        self.as_bytes().update(h)
+    }
+}
+
 impl StableHash for PathBuf {
     #[inline(always)]
     fn update<H: StableHasher>(&self, h: &mut H) {
@@ -142,7 +149,21 @@ impl StableHash for PathBuf {
     }
 }
 
+impl StableHash for &Path {
+    #[inline(always)]
+    fn update<H: StableHasher>(&self, h: &mut H) {
+        self.as_os_str().as_bytes().update(h)
+    }
+}
+
 impl StableHash for String {
+    #[inline(always)]
+    fn update<H: StableHasher>(&self, h: &mut H) {
+        self.as_bytes().update(h)
+    }
+}
+
+impl StableHash for &str {
     #[inline(always)]
     fn update<H: StableHasher>(&self, h: &mut H) {
         self.as_bytes().update(h)
@@ -163,6 +184,16 @@ impl<T: StableHash> StableHash for [T] {
         for i in self.iter() {
             i.update(h);
         }
+    }
+}
+
+impl<T: StableHash> StableHash for Option<T> {
+    #[inline(always)]
+    fn update<H: StableHasher>(&self, h: &mut H) {
+        match self {
+            Some(v) => h.update_hash(1u8).update_hash(v),
+            None => h.update_hash(0u8),
+        };
     }
 }
 

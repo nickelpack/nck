@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use nck_hashing::SupportedHash;
+use nck_hashing::{StableHash, StableHashExt, StableHasherExt, SupportedHash, SupportedHasher};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -27,17 +27,6 @@ pub struct Spec {
     name: String,
     outputs: Vec<String>,
     actions: Vec<Action>,
-}
-
-impl Spec {
-    pub fn iterate_execution(&self) -> ExecutionIterator<'_> {
-        ExecutionIterator {
-            spec: &self.actions,
-            rest: false,
-            env: BTreeMap::new(),
-            work_dir: PathBuf::from("/"),
-        }
-    }
 }
 
 #[derive(Error, Debug, Clone, Eq, PartialEq)]
@@ -122,8 +111,29 @@ pub fn validate_package_name(name: impl AsRef<str>) -> Result<(), InvalidSpec> {
 
     Ok(())
 }
-
 impl Spec {
+    pub fn iterate_execution(&self) -> ExecutionIterator<'_> {
+        ExecutionIterator {
+            spec: &self.actions,
+            rest: false,
+            env: BTreeMap::new(),
+            work_dir: PathBuf::from("/"),
+        }
+    }
+
+    pub fn paths<'a, 'b: 'a>(
+        &'a self,
+        store_directory: &'b PathBuf,
+        hasher: SupportedHasher,
+    ) -> SpecPaths {
+        let hash = self.hash(hasher);
+        SpecPaths {
+            base: format!("{}-{}", self.name, hash),
+            spec: self,
+            store_directory,
+        }
+    }
+
     pub fn builder(name: impl ToString) -> SpecBuilder {
         SpecBuilder::new(name.to_string())
     }
@@ -178,6 +188,50 @@ impl Spec {
     }
 }
 
+impl StableHash for Spec {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        h.update_hash(&self.name)
+            .update_hash(&self.outputs)
+            .update_hash(&self.actions);
+    }
+}
+
+#[derive(Debug)]
+pub struct SpecPaths<'a, 'b> {
+    base: String,
+    spec: &'a Spec,
+    store_directory: &'b PathBuf,
+}
+
+impl<'a, 'b> SpecPaths<'a, 'b> {
+    pub fn spec(&self) -> PathBuf {
+        self.store_directory.join(format!("{}.spec", self.base))
+    }
+
+    pub fn outputs<'c>(&'c self) -> SpecOutputPathsIterator<'a, 'b, 'c> {
+        SpecOutputPathsIterator {
+            paths: self,
+            index: 0,
+        }
+    }
+}
+
+pub struct SpecOutputPathsIterator<'a, 'b, 'c> {
+    paths: &'c SpecPaths<'a, 'b>,
+    index: usize,
+}
+
+impl<'a, 'b, 'c> Iterator for SpecOutputPathsIterator<'a, 'b, 'c> {
+    type Item = (String, PathBuf);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next = self.paths.spec.outputs.get(self.index)?;
+        self.index += 1;
+        let f = format!("{}-{}", self.paths.base, next);
+        Some((next.clone(), self.paths.store_directory.join(f)))
+    }
+}
+
 /// A parsed action.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename = "action")]
@@ -214,6 +268,17 @@ impl Action {
     }
 }
 
+impl StableHash for Action {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        match self {
+            Action::Fetch(v) => h.update_hash(1u8).update_hash(v),
+            Action::Exec(v) => h.update_hash(2u8).update_hash(v),
+            Action::Set(v) => h.update_hash(3u8).update_hash(v),
+            Action::WorkDir(v) => h.update_hash(4u8).update_hash(v),
+        };
+    }
+}
+
 // Fetch a file from a URL.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(into = "ser::Fetch", try_from = "ser::Fetch")]
@@ -222,6 +287,13 @@ pub struct Fetch {
     source: Option<Url>,
     /// The hash of the archive.
     integrity: SupportedHash,
+}
+
+impl StableHash for Fetch {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        h.update_hash(self.source.as_ref().map(|f| f.as_str()))
+            .update_hash(self.integrity);
+    }
 }
 
 impl Fetch {
@@ -246,6 +318,12 @@ pub struct Exec {
     path: PathBuf,
     /// The arguments to pass to the binary.
     args: Vec<OsString>,
+}
+
+impl StableHash for Exec {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        h.update_hash(&self.path).update_hash(&self.args);
+    }
 }
 
 impl Exec {
@@ -299,6 +377,12 @@ pub struct Set {
     value: Option<OsString>,
 }
 
+impl StableHash for Set {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        h.update_hash(&self.name).update_hash(&self.value);
+    }
+}
+
 impl Set {
     pub fn new<V: AsRef<OsStr>>(name: impl AsRef<OsStr>, value: Option<V>) -> Self {
         let name = name.as_ref();
@@ -325,6 +409,12 @@ pub struct WorkDir {
     path: PathBuf,
 }
 
+impl StableHash for WorkDir {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        h.update_hash(&self.path);
+    }
+}
+
 impl WorkDir {
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
@@ -334,5 +424,43 @@ impl WorkDir {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::path::PathBuf;
+
+    use nck_hashing::SupportedHasher;
+    use pretty_assertions::assert_eq;
+
+    use crate::Spec;
+
+    #[test]
+    fn spec_paths() -> anyhow::Result<()> {
+        let spec = Spec::builder("test-1.0.0")
+            .add_output("outa")
+            .add_output("outb")
+            .exec("/test/foo", vec!["--help".into()])
+            .build()?;
+
+        let store_directory = "/some/store".into();
+        let paths = spec.paths(&store_directory, SupportedHasher::blake3());
+
+        assert_eq!(
+            PathBuf::from("/some/store/test-1.0.0-blake3-bkstxebtpenmoi2ogr4piyrrdhtkzfg3aawngtycaahfjr5z4f2q.spec"),
+            paths.spec()
+        );
+
+        let outputs: Vec<_> = paths.outputs().collect();
+        assert_eq!(
+            &[
+                ("outa".to_string(), PathBuf::from("/some/store/test-1.0.0-blake3-bkstxebtpenmoi2ogr4piyrrdhtkzfg3aawngtycaahfjr5z4f2q-outa")),
+                ("outb".to_string(), PathBuf::from("/some/store/test-1.0.0-blake3-bkstxebtpenmoi2ogr4piyrrdhtkzfg3aawngtycaahfjr5z4f2q-outb")),
+            ],
+            &outputs[..]
+        );
+
+        Ok(())
     }
 }

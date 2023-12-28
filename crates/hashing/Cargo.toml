@@ -7,3 +7,6 @@ edition = "2021"
 serde = {workspace = true, features = ["derive"]}
 thiserror.workspace = true
 blake3.workspace = true
+
+data-encoding = { version = "2.5.0", default-features = false }
+data-encoding-macro = "0.1.14"
