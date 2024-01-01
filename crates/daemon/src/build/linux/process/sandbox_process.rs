@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{build::linux::channel::PendingChannel, spec::Spec};
+use crate::build::linux::channel::PendingChannel;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SandboxRequest {}
@@ -15,9 +15,9 @@ pub fn sandbox_process(
     spec_path: PathBuf,
 ) -> anyhow::Result<()> {
     let sandbox_peer = sandbox_peer.into_peer()?;
-    let spec = std::fs::read(spec_path.as_path())?;
-    println!("aaa {}", String::from_utf8_lossy(spec.as_slice()));
-    let spec = rmp_serde::from_slice::<Spec>(spec.as_slice()).unwrap();
+    let spec = std::fs::read_to_string(spec_path.as_path())?;
+    println!("aaa {}", spec);
+    let spec = toml::from_str(&spec)?;
 
     println!("--");
     println!("-- {:?}", spec);

@@ -1,78 +1,72 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    ffi::OsString,
-    io::ErrorKind,
-    ops::Deref,
-    os::unix::prelude::OsStringExt,
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{collections::HashSet, io::ErrorKind, sync::Arc};
 
-use anyhow::Context;
 use axum::{
-    extract::{Multipart, Path, State},
+    extract::{Path, State},
     routing::post,
-    Router,
+    Json, Router,
 };
 use axum_core::{body::Body, extract::Request, response::Response};
-use axum_extra::extract::Query;
-use dashmap::DashMap;
+use dashmap::{mapref::entry::Entry, DashMap};
+use derive_more::{Deref, DerefMut};
 use futures::StreamExt;
 use hyper::{header, HeaderMap, StatusCode};
-use nck_hashing::SupportedHash;
-use rand::Rng;
-use serde::Deserialize;
-use tokio::{io::AsyncWriteExt, sync::Mutex};
+use nck_hashing::{SupportedHash, SupportedHasher};
+use nck_spec::Spec;
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{Mutex, OwnedMappedMutexGuard, OwnedMutexGuard},
+};
 
 use crate::{
-    spec::{CompressionAlgorithm, OutputName, PackageName, Spec},
+    app_error,
+    axum_extensions::{AppError, AppErrorOption, AppErrorReason},
     store::StoreLock,
-    string_types::{self, Error, UrlValue},
 };
 
 use super::FrontendState;
 
-type Result<R = Response, E = Error> = string_types::Result<R, E>;
-
-#[derive(Debug)]
-struct PendingSpec {
-    spec: Spec,
+#[derive(Debug, Default)]
+struct PendingSpecState {
     locks: HashSet<StoreLock>,
 }
 
+#[derive(Debug, Default)]
+struct PendingSpec(Arc<Mutex<Option<PendingSpecState>>>);
+
 impl PendingSpec {
-    pub fn new(name: PackageName) -> Self {
-        PendingSpec {
-            spec: Spec::new(name),
-            locks: HashSet::new(),
+    async fn lock(
+        &self,
+    ) -> Option<OwnedMappedMutexGuard<Option<PendingSpecState>, PendingSpecState>> {
+        let guard = self.0.clone().lock_owned().await;
+        if guard.is_some() {
+            let unwrapped = OwnedMutexGuard::map(guard, |v| v.as_mut().unwrap());
+            Some(unwrapped)
+        } else {
+            None
         }
+    }
+
+    async fn take(&self) -> Option<PendingSpecState> {
+        let mut guard = self.0.clone().lock_owned().await;
+        guard.take()
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deref, DerefMut)]
 struct InnerState {
-    pending_specs: DashMap<PackageName, Arc<Mutex<Option<PendingSpec>>>>,
+    pending_specs: DashMap<String, PendingSpec>,
+    #[deref]
+    #[deref_mut]
     frontend_state: FrontendState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deref, DerefMut)]
 struct SpecsState(Arc<InnerState>);
-
-impl Deref for SpecsState {
-    type Target = InnerState;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 pub fn create_routes(frontend_state: FrontendState) -> Router {
     Router::new()
-        .route("/:name", post(create_spec))
-        .route("/:name/upload", post(upload_file))
-        .route("/:name/action/extract", post(extract_file))
-        .route("/:name/action/execute", post(execute))
+        .route("/", post(create_spec))
+        .route("/:name/add_file", post(add_file))
         .route("/:name/run", post(run))
         .with_state(SpecsState(Arc::new(InnerState {
             pending_specs: DashMap::new(),
@@ -80,78 +74,60 @@ pub fn create_routes(frontend_state: FrontendState) -> Router {
         })))
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateSpec {
-    output: Vec<String>,
-}
+async fn create_spec(State(state): State<SpecsState>) -> Result<Response, AppError> {
+    let name = loop {
+        let pet = petname::petname(3, "-");
+        if let Entry::Vacant(vacant) = state.pending_specs.entry(pet) {
+            break vacant.key().clone();
+        }
+    };
 
-async fn create_spec(
-    State(state): State<SpecsState>,
-    Path(name): Path<UrlValue<PackageName>>,
-    Query(CreateSpec { output }): Query<CreateSpec>,
-) -> Result {
-    let name = name.into_inner();
-
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().try_fill(&mut bytes)?;
-
-    let time = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_micros();
-
-    let pet = petname::petname(3, "-");
-    let id = format!("{name}-{pet}");
-
-    let mut builder = PendingSpec::new(name);
-    for output in output {
-        builder.spec.add_output(output.parse::<OutputName>()?);
-    }
-
-    state
-        .pending_specs
-        .insert(id.parse().unwrap(), Arc::new(Mutex::new(Some(builder))));
-
-    tracing::debug!(?id, "pending spec created");
+    tracing::debug!(?name, "pending spec created");
 
     let response = Response::builder()
         .status(StatusCode::CREATED)
-        .header(header::LOCATION, format!("/api/1/spec/{id}"))
-        .body(Body::empty())?;
+        .header(header::LOCATION, format!("/api/1/spec/{name}"))
+        .body(Body::empty())
+        .reason("creating response")?;
     Ok(response)
 }
 
-async fn upload_file(
+async fn add_file(
     State(state): State<SpecsState>,
-    Path(spec): Path<UrlValue<PackageName>>,
+    Path(spec_name): Path<String>,
     header_map: HeaderMap,
     body: Request,
-) -> Result {
-    // TODO: Use multipart here for consistency.
+) -> Result<Response, AppError> {
+    // TODO: optionally accept multipart here.
 
-    let spec = spec.into_inner();
     let mut spec = state
         .pending_specs
-        .get(&spec)
-        .ok_or_else(|| Error::not_found("spec not found"))?
-        .clone()
-        .lock_owned()
+        .get(&spec_name)
+        .ok_or_else_message(|| format!("spec {} not found", spec_name))?
+        .lock()
         .await;
-    let spec = spec
-        .as_mut()
-        .ok_or_else(|| Error::not_found("spec already executing"))?;
+
+    let spec = spec.as_mut().ok_or_else_message(|| {
+        format!("spec {} has already been submitted for build", spec_name)
+    })?;
 
     if let Some(existing_hash) = header_map.get("If-None-Match") {
         let v = existing_hash.as_bytes();
         let v = if v.starts_with(b"\"") && v.ends_with(b"\"") {
             &v[1..(v.len() - 2)]
         } else {
-            Error::bad_request(()).err()?
+            app_error!("parsing If-None-Match value")
+                .err()
+                .with_message(|| "invalid If-None-Match value".to_string())
+                .status_code(StatusCode::BAD_REQUEST)?;
         };
 
-        let hash: SupportedHash = std::str::from_utf8(v)
-            .with_context(|| "invalid If-None-Match value")?
-            .parse()
-            .with_context(|| "invalid If-None-Match value")?;
+        let hash = std::str::from_utf8(v)
+            .reason("parsing If-None-Match value")
+            .with_message(|| "invalid If-None-Match value".to_string())
+            .status_code(StatusCode::BAD_REQUEST)?;
+
+        let hash: SupportedHash = hash.parse().reason("test")?;
 
         match state.frontend_state.store.get_file(&hash).await {
             Ok(file) => {
@@ -162,32 +138,41 @@ async fn upload_file(
                     .status(StatusCode::SEE_OTHER)
                     .header(header::ETAG, format!("\"{hash}\""))
                     .header(header::LOCATION, format!("/api/1/download/{hash}"))
-                    .body(Body::empty())?;
+                    .body(Body::empty())
+                    .reason("building response")?;
                 return Ok(response);
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {
                 tracing::trace!("file not cached");
             }
-            Err(other) => Err(other)?,
+            Err(other) => Err(other).reason("querying the store")?,
         }
     }
 
-    let mut file = state.frontend_state.store.create_file().await?;
+    let mut file = state
+        .frontend_state
+        .store
+        .create_file()
+        .await
+        .reason("creating a temporary file to upload into")?;
     let mut body = body.into_body().into_data_stream();
-    let mut hash = blake3::Hasher::new();
+    let mut hash = SupportedHasher::blake3();
 
     tracing::debug!("accepting uploaded data");
 
     while let Some(val) = body.next().await {
-        let mut val = val?;
+        let mut val = val.reason("reading request")?;
         hash.update(&val[..]);
         file.write_all_buf(&mut val)
             .await
-            .with_context(|| "while writing to temporary upload file")?;
+            .reason("writing to temporary upload file")?;
     }
 
-    let hash = SupportedHash::Blake3(*hash.finalize().as_bytes());
-    let final_lock = file.complete(&hash).await?;
+    let hash = hash.finalize();
+    let final_lock = file
+        .complete(&hash)
+        .await
+        .reason("committing the file to the store")?;
     spec.locks.insert(final_lock);
 
     tracing::debug!(%hash, "file uploaded");
@@ -196,199 +181,40 @@ async fn upload_file(
         .status(StatusCode::CREATED)
         .header(header::ETAG, format!("\"{hash}\""))
         .header(header::LOCATION, format!("/api/1/download/{hash}"))
-        .body(Body::empty())?;
+        .body(Body::empty())
+        .reason("creating response")?;
 
     Ok(response)
 }
 
-async fn extract_file(
+async fn run(
     State(state): State<SpecsState>,
-    Path(spec): Path<UrlValue<PackageName>>,
-    mut multipart: Multipart,
-) -> Result {
-    let spec = spec.into_inner();
-    let mut spec = state
-        .pending_specs
-        .get(&spec)
-        .ok_or_else(|| Error::not_found("spec not found"))?
-        .clone()
-        .lock_owned()
-        .await;
-    let spec = spec
-        .as_mut()
-        .ok_or_else(|| Error::not_found("spec already executing"))?;
-
-    let mut source = None;
-    let mut dest = None;
-    let mut compression = None;
-    while let Some(field) = multipart.next_field().await? {
-        match field.name() {
-            Some("source") => {
-                let text = field.text().await?;
-                let old = source.replace(SupportedHash::from_str(text.as_str())?);
-                if old.is_some() {
-                    Error::bad_request("duplicate source field").err()?;
-                }
-            }
-            Some("dest") => {
-                let bytes = field.bytes().await?.to_vec();
-                let old = dest.replace(PathBuf::from(OsString::from_vec(bytes)));
-                if old.is_some() {
-                    Error::bad_request("duplicate dest field").err()?;
-                }
-            }
-            Some("compression") => {
-                let text = field.text().await?;
-                let alg = CompressionAlgorithm::from_str(text.as_str())?;
-                let old = compression.replace(alg);
-                if old.is_some() {
-                    Error::bad_request("duplicate compression field").err()?;
-                }
-            }
-            Some(other) => Error::bad_request(format!("unknown field {}", other)).err()?,
-            None => Error::bad_request("all fields must have a name").err()?,
-        }
-    }
-
-    let source = source.ok_or_else(|| Error::bad_request("source field is required"))?;
-    let dest = dest.ok_or_else(|| Error::bad_request("dest field is required"))?;
-    let compression = compression.unwrap_or_default();
-
-    match state.0.frontend_state.store.get_file(&source).await {
-        Ok(lock) => {
-            spec.locks.insert(lock);
-        }
-        Err(e) if e.kind() == ErrorKind::NotFound => Error::not_found("source not found").err()?,
-        Err(e) => Err(e)?,
-    }
-
-    spec.spec.push_action(crate::spec::Action::Extract(
-        source,
-        dest.clone(),
-        compression,
-    ));
-
-    tracing::debug!(%source, ?dest, "extract action added");
-
-    let response = Response::builder()
-        .status(StatusCode::ACCEPTED)
-        .body(Body::empty())?;
-    Ok(response)
-}
-
-async fn execute(
-    State(state): State<SpecsState>,
-    Path(spec): Path<UrlValue<PackageName>>,
-    mut multipart: Multipart,
-) -> Result {
-    let spec = spec.into_inner();
-    let mut spec = state
-        .pending_specs
-        .get(&spec)
-        .ok_or_else(|| Error::not_found("spec not found"))?
-        .clone()
-        .lock_owned()
-        .await;
-    let spec = spec
-        .as_mut()
-        .ok_or_else(|| Error::not_found("spec already executing"))?;
-
-    let mut bin = None;
-    let mut args = BTreeMap::<usize, OsString>::new();
-    let mut env = BTreeMap::<OsString, OsString>::new();
-    while let Some(field) = multipart.next_field().await? {
-        match field.name() {
-            Some("bin") => {
-                let bytes = field.bytes().await?.to_vec();
-                let old = bin.replace(OsString::from_vec(bytes));
-                if old.is_some() {
-                    Error::bad_request("duplicate bin field").err()?;
-                }
-            }
-            Some(other) => {
-                if let Some(index) = parse_array::<usize>("arg", other) {
-                    if args.contains_key(&index) {
-                        Error::bad_request(format!("duplicate {} field", other)).err()?
-                    }
-                    let bytes = field.bytes().await?.to_vec();
-                    args.insert(index, OsString::from_vec(bytes));
-                } else if let Some(name) = parse_array::<OsString>("env", other) {
-                    if env.contains_key(&name) {
-                        Error::bad_request(format!("duplicate {} field", other)).err()?
-                    }
-                    let bytes = field.bytes().await?.to_vec();
-                    env.insert(name, OsString::from_vec(bytes));
-                } else {
-                    Error::bad_request(format!("unknown field {}", other)).err()?
-                }
-            }
-            None => Error::bad_request("all fields must have a name").err()?,
-        }
-    }
-
-    let bin = bin.ok_or_else(|| Error::bad_request("bin field is missing"))?;
-
-    let args: Vec<_> = args.into_values().collect();
-    spec.spec
-        .push_action(crate::spec::Action::Execute(PathBuf::from(&bin), args, env));
-
-    tracing::debug!(?bin, "execute");
-
-    let response = Response::builder()
-        .status(StatusCode::ACCEPTED)
-        .body(Body::empty())?;
-    Ok(response)
-}
-
-async fn run(State(state): State<SpecsState>, Path(spec): Path<UrlValue<PackageName>>) -> Result {
-    let spec = spec.into_inner();
-    let mut spec = state
+    Path(spec): Path<String>,
+    Json(body): Json<Spec>,
+) -> Result<Response, AppError> {
+    let pending = state
         .pending_specs
         .remove(&spec)
-        .ok_or_else(|| Error::not_found("spec not found"))?
+        .ok_or_else_message(|| format!("spec {} not found", spec))?
         .1
-        .clone()
-        .lock_owned()
-        .await;
-    let spec = spec
         .take()
-        .ok_or_else(|| Error::not_found("spec already executing"))?;
+        .await
+        .ok_or_else_message(|| format!("spec {} has already been submitted", spec))?;
 
-    if !spec
-        .spec
-        .actions_iter()
-        .any(|f| matches!(f, &crate::spec::Action::Execute(_, _, _)))
-    {
-        Error::bad_request("at least one execute action is required").err()?;
-    }
-
-    let locks: Vec<_> = spec.locks.into_iter().collect();
-    let spec = spec.spec;
+    let locks: Vec<_> = pending.locks.into_iter().collect();
 
     state
         .0
         .frontend_state
         .store
         .clone()
-        .start(spec, locks)
-        .await?;
+        .start(body, locks)
+        .await
+        .reason("starting the build")?;
 
     let response = Response::builder()
         .status(StatusCode::ACCEPTED)
-        .body(Body::empty())?;
+        .body(Body::empty())
+        .reason("creating response")?;
     Ok(response)
-}
-
-fn parse_array<T: FromStr>(name: &str, v: &str) -> Option<T> {
-    if !v.starts_with(name) {
-        return None;
-    }
-    let v = &v[name.len()..];
-
-    if !v.starts_with('[') || !v.ends_with(']') {
-        return None;
-    }
-    let v = &v[1..(v.len() - 1)];
-
-    T::from_str(v).ok()
 }

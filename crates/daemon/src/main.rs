@@ -3,13 +3,14 @@
 #![feature(unix_socket_ancillary_data)]
 
 use build::linux::PendingController;
+use settings::Settings;
 use store::Store;
 use tracing_subscriber::prelude::*;
 
+mod axum_extensions;
 mod build;
 mod frontend;
 mod settings;
-mod spec;
 mod store;
 mod string_types;
 
@@ -20,19 +21,28 @@ fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    let settings: Settings = config::Config::builder()
+        .add_source(
+            config::Environment::with_prefix("nck")
+                .separator("__")
+                .try_parsing(true),
+        )
+        .build()?
+        .try_deserialize()?;
+
     let controller = build::native::create_controller()?;
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main(controller))
+        .block_on(async_main(controller, settings))
 }
 
-async fn async_main(controller: PendingController) -> anyhow::Result<()> {
+async fn async_main(controller: PendingController, settings: Settings) -> anyhow::Result<()> {
     let controller = controller.into_controller().await?;
-    let store = Store::new(controller).await?;
+    let store = Store::new(controller, &settings.store).await?;
 
-    let front_end = tokio::spawn(frontend::frontend(store.clone()));
+    let front_end = tokio::spawn(frontend::frontend(store.clone(), settings.clone()));
 
     front_end.await?
 }

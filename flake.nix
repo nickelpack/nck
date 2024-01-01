@@ -54,15 +54,15 @@
             if user=$(try_find $(id -u) /etc/subuid) || user=$(try_find $(id -un) /etc/subuid); then
               parts=( )
               IFS=' ' read -r -a parts <<< "$user"
-              export NCK__LINUX__SUB_UID__MIN=''${parts[0]}
-              export NCK__LINUX__SUB_UID__MAX=''${parts[1]}
+              export NCK__DAEMON__SUB_UID__MIN=''${parts[0]}
+              export NCK__DAEMON__SUB_UID__MAX=''${parts[1]}
             fi
 
             if group=$(try_find $(id -g) /etc/subgid) || group=$(try_find $(id -gn) /etc/subgid); then
               parts=( )
               IFS=' ' read -r -a parts <<< "$group"
-              export NCK__LINUX__SUB_GID__MIN=''${parts[0]}
-              export NCK__LINUX__SUB_GID__MAX=''${parts[1]}
+              export NCK__DAEMON__SUB_GID__MIN=''${parts[0]}
+              export NCK__DAEMON__SUB_GID__MAX=''${parts[1]}
             fi
           '';
         });

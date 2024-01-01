@@ -1,11 +1,6 @@
-use std::{path::PathBuf, sync::LazyLock};
+use std::path::PathBuf;
 
 use serde::Deserialize;
-
-pub static ROOT_DIRECTORY: LazyLock<PathBuf> = LazyLock::new(|| PathBuf::from("/var/nck"));
-pub static STORE_DIRECTORY: LazyLock<PathBuf> = LazyLock::new(|| ROOT_DIRECTORY.join("store"));
-pub const SOCKET_PATH: &str = "/var/nck/nck-daemon.socket";
-pub static TMP_DIRECTORY: LazyLock<PathBuf> = LazyLock::new(|| std::env::temp_dir().join("nck"));
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LinuxSubIdSetting {
@@ -25,14 +20,41 @@ pub struct TcpSettings {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Settings {
-    #[cfg(target_os = "linux")]
-    pub linux: LinuxSandboxSettings,
-
-    #[serde(default = "default_tcp_settings")]
-    pub tcp: TcpSettings,
+pub struct StoreSettings {
+    pub path: PathBuf,
+    pub temp: PathBuf,
 }
 
-fn default_tcp_settings() -> TcpSettings {
-    TcpSettings::default()
+impl Default for StoreSettings {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from("/var/nck/store"),
+            temp: std::env::temp_dir().join("nck"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DaemonSettings {
+    #[cfg(target_os = "linux")]
+    #[serde(flatten)]
+    pub linux: LinuxSandboxSettings,
+
+    #[serde(default)]
+    pub tcp: TcpSettings,
+
+    #[serde(default = "default_socket_path")]
+    pub socket_path: PathBuf,
+}
+
+fn default_socket_path() -> PathBuf {
+    "/var/nck/daemon.sock".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Settings {
+    #[serde(default)]
+    pub store: StoreSettings,
+
+    pub daemon: DaemonSettings,
 }

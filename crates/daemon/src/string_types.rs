@@ -1,62 +1,6 @@
 use std::{marker::PhantomData, ops::Deref, str::FromStr};
 
-use axum_core::response::{IntoResponse, Response};
-use hyper::StatusCode;
 use serde::de::Visitor;
-
-#[derive(Debug)]
-pub enum Error {
-    Unknown(anyhow::Error),
-    Response(Response),
-}
-
-impl Error {
-    pub fn err(self) -> Result<!, Self> {
-        Err(self)
-    }
-
-    pub fn status_code<R: IntoResponse>(s: StatusCode, r: R) -> Self {
-        let mut response = r.into_response();
-        *response.status_mut() = s;
-        Self::Response(response)
-    }
-
-    pub fn not_found<R: IntoResponse>(r: R) -> Self {
-        Self::status_code(StatusCode::NOT_FOUND, r)
-    }
-
-    pub fn bad_request<R: IntoResponse>(r: R) -> Self {
-        Self::status_code(StatusCode::BAD_REQUEST, r)
-    }
-}
-
-impl<E: Into<anyhow::Error>> From<E> for Error {
-    fn from(error: E) -> Self {
-        Error::Unknown(error.into())
-    }
-}
-
-impl IntoResponse for Error {
-    fn into_response(self) -> Response {
-        let correlation_id = uuid::Uuid::new_v4().hyphenated().to_string();
-        let mut response = match self {
-            Self::Unknown(error) => {
-                tracing::error!(correlation_id, error = ?error, "{}", error);
-                Response::builder()
-                    .status(500)
-                    .body(axum::body::Body::empty())
-                    .unwrap()
-            }
-            Self::Response(response) => response,
-        };
-        response
-            .headers_mut()
-            .insert("X-Correlation-ID", correlation_id.parse().unwrap());
-        response
-    }
-}
-
-pub type Result<T = Response, E = Error> = std::result::Result<T, E>;
 
 #[repr(transparent)]
 #[derive(Debug)]

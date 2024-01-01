@@ -1,4 +1,4 @@
-use crate::store::Store;
+use crate::{settings::Settings, store::Store};
 
 mod serve;
 mod specs;
@@ -8,12 +8,12 @@ struct FrontendState {
     store: Store,
 }
 
-pub async fn frontend(store: Store) -> anyhow::Result<()> {
+pub async fn frontend(store: Store, settings: Settings) -> anyhow::Result<()> {
     let state = FrontendState { store };
 
     let app = axum::Router::new().nest("/api/1/spec", specs::create_routes(state.clone()));
 
-    serve::serve(crate::settings::TcpSettings::default(), app).await?;
+    serve::serve(&settings.daemon, app).await?;
 
     Ok(())
 }

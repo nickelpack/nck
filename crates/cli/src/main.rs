@@ -2,6 +2,8 @@ mod archive;
 
 use clap::{Parser, Subcommand};
 
+// TODO: Having enums derive this for all variants would be ideal, but I can't find a crate that does that - and such a
+// crate is extremely out of scope for Nickelpack.
 trait CommandExec {
     async fn execute(self) -> anyhow::Result<()>;
 }

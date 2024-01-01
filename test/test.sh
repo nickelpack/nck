@@ -5,7 +5,7 @@ pwd=$(pwd)
 host=http://socket
 
 req() {
-  curl -si --unix-socket /var/nck/nck-daemon.socket "$@"
+  curl -si --unix-socket /var/nck/daemon.sock "$@"
 }
 
 upload_file() {
@@ -33,7 +33,9 @@ extract_file() {
   echo "$source: $result"
 }
 
-create_formula_response=$(req -X POST "$host/api/1/spec/glibc-2.38?output=out" | sed 's#\r##g')
+req -v -X POST "$host/api/1/spec"
+
+create_formula_response=$(req -X POST "$host/api/1/spec" | sed 's#\r##g')
 echo "$create_formula_response"
 formula_url=$(awk -v FS=": " '/^location/{print $2}' <<< "$create_formula_response")
 echo "-- $formula_url --" 1>&2

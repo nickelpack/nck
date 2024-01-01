@@ -11,7 +11,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tower_service::Service;
 
-use crate::settings::{TcpSettings, SOCKET_PATH};
+use crate::settings::DaemonSettings;
 
 enum Client {
     Tcp {
@@ -103,21 +103,22 @@ impl Connected<&Client> for ClientInfo {
     }
 }
 
-pub async fn serve(tcp: TcpSettings, router: axum::Router) -> anyhow::Result<()>
+pub async fn serve(settings: &DaemonSettings, router: axum::Router) -> anyhow::Result<()>
 where
 {
-    if tokio::fs::try_exists(SOCKET_PATH).await? {
-        tracing::trace!("cleaning up previous socket at {}", SOCKET_PATH);
-        tokio::fs::remove_file(SOCKET_PATH)
+    let socket_path = &settings.socket_path;
+    if tokio::fs::try_exists(socket_path).await? {
+        tracing::trace!(?socket_path, "cleaning up previous socket");
+        tokio::fs::remove_file(&settings.socket_path)
             .await
-            .with_context(|| format!("failed to bind to {}", SOCKET_PATH))?;
+            .with_context(|| format!("failed to bind to {:?}", &settings.socket_path))?;
     }
 
-    tracing::trace!("binding to {}", SOCKET_PATH);
-    let unix = UnixListener::bind(SOCKET_PATH)?;
+    tracing::trace!(?socket_path, "binding");
+    let unix = UnixListener::bind(socket_path)?;
 
-    let mut socket_addrs = Vec::with_capacity(tcp.bind.len());
-    for bind in tcp.bind {
+    let mut socket_addrs = Vec::with_capacity(settings.tcp.bind.len());
+    for bind in settings.tcp.bind.iter() {
         for addr in bind.to_socket_addrs()? {
             socket_addrs.push(addr);
         }
