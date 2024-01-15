@@ -1,8 +1,9 @@
+use nck_io::PrintableBuffer;
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use which::which;
 
 #[derive(Debug, thiserror::Error)]
@@ -25,14 +26,16 @@ type Result<T> = std::result::Result<T, UserNamespaceError>;
 pub enum MappingError {
     #[error("newuidmap/newgidmap binaries could not be found in path")]
     BinaryNotFound,
-    #[error("could not find PATH")]
-    NoPathEnv,
     #[error("failed to execute newuidmap/newgidmap")]
     Execute(#[source] std::io::Error),
+    #[error("newuidmap/newgidmap exited with status {exit_code:?}:\n{stdout}\n{stderr}")]
+    FailureStatus {
+        exit_code: ExitStatus,
+        stdout: String,
+        stderr: String,
+    },
     #[error("at least one id mapping needs to be defined")]
     NoIDMapping,
-    #[error("failed to write id mapping")]
-    WriteIDMapping(#[source] std::io::Error),
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -99,13 +102,11 @@ impl UserNamespaceConfig {
     }
 
     pub fn write_uid_mapping(&self, target_pid: Pid) -> Result<()> {
-        tracing::debug!("write UID mapping for {:?}", target_pid);
         write_id_mapping(target_pid, &self.uid_mappings, self.newuidmap.as_path())?;
         Ok(())
     }
 
     pub fn write_gid_mapping(&self, target_pid: Pid) -> Result<()> {
-        tracing::debug!("write GID mapping for {:?}", target_pid);
         write_id_mapping(target_pid, &self.gid_mappings, self.newgidmap.as_path())?;
         Ok(())
     }
@@ -131,12 +132,6 @@ pub fn unprivileged_user_ns_enabled() -> Result<bool> {
     }
 }
 
-fn is_id_mapped(id: u32, mappings: &[LinuxIdMapping]) -> bool {
-    mappings
-        .iter()
-        .any(|m| id >= m.container_id() && id <= m.container_id() + m.size())
-}
-
 /// Looks up the location of the newuidmap and newgidmap binaries which
 /// are required to write multiple user/group mappings
 pub fn lookup_map_binaries() -> std::result::Result<(PathBuf, PathBuf), MappingError> {
@@ -154,7 +149,7 @@ fn write_id_mapping(
     mappings: &[LinuxIdMapping],
     map_binary: &Path,
 ) -> std::result::Result<(), MappingError> {
-    tracing::debug!("Write ID mapping: {:?}", mappings);
+    tracing::trace!(?pid, ?mappings, "write ID mapping");
 
     match mappings.len() {
         0 => return Err(MappingError::NoIDMapping),
@@ -170,7 +165,9 @@ fn write_id_mapping(
                 })
                 .collect();
 
-            Command::new(map_binary)
+            tracing::trace!(?map_binary, ?args, "calling ID binary");
+
+            let status = Command::new(map_binary)
                 .arg(pid.to_string())
                 .args(args)
                 .output()
@@ -178,6 +175,17 @@ fn write_id_mapping(
                     tracing::error!(?err, ?map_binary, "failed to execute newuidmap/newgidmap");
                     MappingError::Execute(err)
                 })?;
+
+            if !status.status.success() {
+                let exit_code = status.status;
+                let stdout = PrintableBuffer(&status.stdout).to_string();
+                let stderr = PrintableBuffer(&status.stderr).to_string();
+                return Err(MappingError::FailureStatus {
+                    exit_code,
+                    stdout,
+                    stderr,
+                });
+            }
         }
     }
 

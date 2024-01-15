@@ -75,14 +75,6 @@ impl IntoExitCode for i32 {
     }
 }
 
-// Fork a child process and execute the callback.
-pub fn fork() -> Result<Option<Pid>, ForkError> {
-    match unsafe { nix::unistd::fork() }.map_err(ForkError::Fork)? {
-        nix::unistd::ForkResult::Parent { child } => Ok(Some(child)),
-        nix::unistd::ForkResult::Child => Ok(None),
-    }
-}
-
 // Clone a child process and execute the callback.
 pub fn clone<R: IntoExitCode + std::fmt::Debug>(
     cb: CloneCb<R>,

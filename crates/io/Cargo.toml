@@ -7,3 +7,9 @@ edition = "2021"
 bytes.workspace = true
 tokio = { workspace = true, features = [ "fs", "io-util" ]}
 rand.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies.nix]
+workspace = true
+features = [
+  "fs",
+]

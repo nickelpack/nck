@@ -8,14 +8,10 @@ use std::{
 
 use dashmap::{mapref::entry::Entry, DashMap};
 use derive_more::{Deref, DerefMut};
-use nck_hashing::{StableHashExt, SupportedHash, SupportedHasher};
+use nck_hashing::{SupportedHash, SupportedHasher};
 use nck_io::fs::TempFile;
 use nck_spec::Spec;
-use tokio::{
-    fs::{File, OpenOptions},
-    io::AsyncWriteExt,
-    task::JoinSet,
-};
+use tokio::{fs::File, io::AsyncWriteExt, task::JoinSet};
 
 use crate::{
     build::linux::{Controller, Sandbox},
@@ -70,7 +66,7 @@ impl StoreState {
             .and_modify(|f| {
                 f.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             })
-            .or_default();
+            .or_insert_with(|| AtomicUsize::new(1));
     }
 
     fn decrease_lock(&self, path: PathBuf) {
@@ -123,38 +119,36 @@ impl Store {
         PendingFile::new(self.0.clone()).await
     }
 
-    pub async fn start(&self, spec: Spec, locks: Vec<StoreLock>) -> anyhow::Result<()> {
-        let hash = spec.hash(SupportedHasher::blake3());
-        let name = format!("{}-{}", spec.name(), &hash);
+    pub async fn start(&self, spec: Spec) -> anyhow::Result<()> {
+        let output_path = spec
+            .paths(&self.paths.store, SupportedHasher::blake3())
+            .spec();
 
-        let output_path = self.paths.store.join(format!("{}.spec", name));
+        let mut locks = Vec::new();
+        let dec = DecrementLock::new(output_path.clone(), self.0.clone());
+        locks.push(dec);
 
-        // TODO: Deal with incorrect data on disk, and write to a temporary file first.
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(output_path.as_path())
-            .await
         {
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-            Err(other) => Err(other)?,
-            Ok(mut file) => {
-                let s = toml::to_string_pretty(&spec)?;
-                file.write_all(s.as_bytes()).await?;
-            }
+            let parent = output_path.parent().unwrap();
+            let (temp, mut file) = TempFile::new_in(parent).await?;
+            let s = toml::to_string_pretty(&spec)?;
+            file.write_all(s.as_bytes()).await?;
+            temp.write_to(output_path.as_path()).await?;
+        }
+
+        for dep in spec.dependencies() {
+            let path = dep.path(&self.paths.store);
+            let dec = DecrementLock::new(path.clone(), self.0.clone());
+            locks.push(dec);
         }
 
         let sandbox = self.controller.spawn_async(output_path.as_path()).await?;
-        let build = Build {
-            sandbox,
-            locks: locks.into_iter().map(|v| v.dec).collect(),
-        };
+        let build = Build { sandbox, locks };
 
         let id = self
             .counter
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.builds.insert(id, build);
-
         Ok(())
     }
 }

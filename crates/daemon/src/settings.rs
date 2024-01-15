@@ -4,8 +4,8 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LinuxSubIdSetting {
-    min: u32,
-    max: u32,
+    pub min: u32,
+    pub max: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]

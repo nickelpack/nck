@@ -34,11 +34,12 @@ pub trait StableHasherExt: StableHasher {
     ///
     /// Don't use this on types where the order is not deterministic, such as [`std::collections::HashMap`]. Use
     /// collections with stable ordering instead, such as [`std::collections::BTreeMap`].
-    fn update_iter<H: StableHash>(&mut self, v: impl ExactSizeIterator<Item = H>) -> &mut Self {
-        self.update_hash(v.len());
-        for v in v {
+    fn update_iter<H: StableHash>(&mut self, v: impl Iterator<Item = H>) -> &mut Self {
+        for (i, v) in v.enumerate() {
+            self.update_hash(i as u64);
             v.update(self);
         }
+        self.update_hash(u64::MAX);
         self
     }
 }

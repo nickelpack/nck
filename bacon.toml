@@ -29,7 +29,7 @@ need_stdout = false
 # - the tests of a package: bacon test -- -- -p config
 [jobs.test]
 command = [
-    "cargo", "nextest", "run", "--color", "always",
+    "cargo", "test", "--color", "always",
 ]
 need_stdout = true
 

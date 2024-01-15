@@ -5,9 +5,8 @@ use std::{
 };
 
 use nck_hashing::SupportedHash;
-use url::Url;
 
-use crate::{Action, InvalidSpec, Spec};
+use crate::{Action, Dependency, InvalidSpec, LinkFlags, Spec};
 
 /// A builder that creates a [`Spec`].
 #[derive(Debug)]
@@ -15,6 +14,7 @@ pub struct SpecBuilder {
     name: String,
     outputs: BTreeSet<String>,
     actions: Vec<Action>,
+    dependencies: BTreeSet<Dependency>,
 }
 
 impl SpecBuilder {
@@ -23,6 +23,7 @@ impl SpecBuilder {
             name,
             outputs: BTreeSet::new(),
             actions: Vec::new(),
+            dependencies: BTreeSet::new(),
         }
     }
 
@@ -31,6 +32,7 @@ impl SpecBuilder {
             self.name.clone(),
             self.outputs.iter().cloned().collect(),
             self.actions.clone(),
+            self.dependencies.iter().cloned(),
         )
     }
 
@@ -51,11 +53,6 @@ impl SpecBuilder {
         self
     }
 
-    pub fn fetch(&mut self, source: Option<Url>, integrity: SupportedHash) -> &mut Self {
-        self.actions.push(Action::fetch(source, integrity));
-        self
-    }
-
     pub fn exec(&mut self, path: impl AsRef<Path>, args: Vec<OsString>) -> &mut Self {
         self.actions.push(Action::exec(path, args));
         self
@@ -71,8 +68,37 @@ impl SpecBuilder {
         self
     }
 
+    pub fn dependency(&mut self, dependency: Dependency) -> &mut Self {
+        self.dependencies.insert(dependency);
+        self
+    }
+
+    pub fn package(
+        &mut self,
+        name: impl ToString,
+        output: impl ToString,
+        integrity: SupportedHash,
+    ) -> &mut Self {
+        self.dependency(Dependency::package(name, output, integrity))
+    }
+
+    pub fn file(&mut self, integrity: SupportedHash) -> &mut Self {
+        self.dependency(Dependency::file(integrity))
+    }
+
     pub fn work_dir(&mut self, path: impl AsRef<Path>) -> &mut Self {
         self.actions.push(Action::work_dir(path));
+        self
+    }
+
+    pub fn link(
+        &mut self,
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+        flags: Option<LinkFlags>,
+    ) -> &mut Self {
+        self.actions
+            .push(Action::link(from, to, flags.unwrap_or_default()));
         self
     }
 }

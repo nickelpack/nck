@@ -10,7 +10,6 @@ use std::{
 use nck_hashing::{StableHash, StableHashExt, StableHasherExt, SupportedHash, SupportedHasher};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use url::Url;
 
 mod builder;
 pub use builder::*;
@@ -27,6 +26,7 @@ pub struct Spec {
     name: String,
     outputs: Vec<String>,
     actions: Vec<Action>,
+    dependencies: Vec<Dependency>,
 }
 
 #[derive(Error, Debug, Clone, Eq, PartialEq)]
@@ -35,6 +35,8 @@ pub enum InvalidSpec {
     InvalidPackageName(String),
     #[error("invalid output name '{}'", _0)]
     InvalidOutputName(String),
+    #[error("invalid hash '{}'", _0)]
+    InvalidHash(String),
     /// An invalid environment variable name was provided.
     ///
     /// Environment variable names must:
@@ -111,6 +113,7 @@ pub fn validate_package_name(name: impl AsRef<str>) -> Result<(), InvalidSpec> {
 
     Ok(())
 }
+
 impl Spec {
     pub fn iterate_execution(&self) -> ExecutionIterator<'_> {
         ExecutionIterator {
@@ -123,14 +126,14 @@ impl Spec {
 
     pub fn paths<'a, 'b: 'a>(
         &'a self,
-        store_directory: &'b PathBuf,
+        store_directory: &'b impl AsRef<Path>,
         hasher: SupportedHasher,
     ) -> SpecPaths {
-        let hash = self.hash(hasher);
+        let integrity = self.hash(hasher);
         SpecPaths {
-            base: format!("{}-{}", self.name, hash),
+            integrity,
             spec: self,
-            store_directory,
+            store_directory: store_directory.as_ref(),
         }
     }
 
@@ -138,7 +141,12 @@ impl Spec {
         SpecBuilder::new(name.to_string())
     }
 
-    fn new(name: String, outputs: Vec<String>, actions: Vec<Action>) -> Result<Self, InvalidSpec> {
+    fn new(
+        name: String,
+        outputs: Vec<String>,
+        actions: Vec<Action>,
+        dependencies: impl Iterator<Item = Dependency>,
+    ) -> Result<Self, InvalidSpec> {
         let mut has_exec = false;
 
         validate_package_name(name.as_str())?;
@@ -156,7 +164,7 @@ impl Spec {
                 Action::Exec(_) => has_exec = true,
                 Action::Set(_) => has_exec = false,
                 Action::WorkDir(_) => has_exec = false,
-                Action::Fetch(_) => has_exec = false,
+                Action::Link(_) => has_exec = false,
             }
         }
 
@@ -167,6 +175,7 @@ impl Spec {
                 name,
                 outputs,
                 actions,
+                dependencies: dependencies.collect(),
             })
         }
     }
@@ -175,37 +184,160 @@ impl Spec {
         &self.name
     }
 
-    pub fn outputs(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &str> + DoubleEndedIterator<Item = &str> {
+    pub fn outputs(&self) -> impl Iterator<Item = &str> + DoubleEndedIterator<Item = &str> {
         self.outputs.iter().map(|f| f.as_str())
     }
 
-    pub fn actions(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &Action> + DoubleEndedIterator<Item = &Action> {
+    pub fn actions(&self) -> impl Iterator<Item = &Action> + DoubleEndedIterator<Item = &Action> {
         self.actions.iter()
+    }
+
+    pub fn dependencies(
+        &self,
+    ) -> impl Iterator<Item = &Dependency> + DoubleEndedIterator<Item = &Dependency> {
+        self.dependencies.iter()
     }
 }
 
 impl StableHash for Spec {
     fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        h.update_hash(&self.name).update_hash(&self.outputs);
+
+        // The effects are what matters, not how (what order) they are described
+        for action in self.iterate_execution() {
+            h.update_hash(action);
+        }
+        h.update_hash(0u8);
+
+        h.update_iter(self.dependencies.iter());
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PackageDependency {
+    name: String,
+    output: String,
+    integrity: SupportedHash,
+}
+
+impl PackageDependency {
+    pub fn new(name: impl ToString, output: impl ToString, integrity: SupportedHash) -> Self {
+        Self {
+            name: name.to_string(),
+            output: output.to_string(),
+            integrity,
+        }
+    }
+
+    pub fn path(&self, store_directory: impl AsRef<Path>) -> PathBuf {
+        Self::format_path(
+            store_directory,
+            &self.name,
+            self.integrity,
+            Some(&self.output),
+        )
+    }
+
+    pub fn spec_path(&self, store_directory: impl AsRef<Path>) -> PathBuf {
+        Self::format_path(store_directory, &self.name, self.integrity, None::<&str>)
+    }
+
+    pub fn format_path<O: AsRef<str>>(
+        store_directory: impl AsRef<Path>,
+        name: impl AsRef<str>,
+        integrity: SupportedHash,
+        output: Option<O>,
+    ) -> PathBuf {
+        let name = name.as_ref();
+        if let Some(output) = output {
+            let output = output.as_ref();
+            let f = format!("{name}-{integrity}-{output}");
+            store_directory.as_ref().join(f)
+        } else {
+            let f = format!("{name}-{integrity}.spec");
+            store_directory.as_ref().join(f)
+        }
+    }
+}
+
+impl StableHash for PackageDependency {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
         h.update_hash(&self.name)
-            .update_hash(&self.outputs)
-            .update_hash(&self.actions);
+            .update_hash(&self.output)
+            .update_hash(self.integrity);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FileDependency {
+    integrity: SupportedHash,
+}
+
+impl FileDependency {
+    pub fn new(integrity: SupportedHash) -> Self {
+        Self { integrity }
+    }
+
+    pub fn path(&self, store_directory: impl AsRef<Path>) -> PathBuf {
+        let integrity = &self.integrity;
+        store_directory.as_ref().join(format!("files/{integrity}"))
+    }
+}
+
+impl StableHash for FileDependency {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        h.update_hash(self.integrity);
+    }
+}
+
+/// A spec dependency.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Dependency {
+    Package(PackageDependency),
+    File(FileDependency),
+}
+
+impl Dependency {
+    pub fn package(name: impl ToString, output: impl ToString, integrity: SupportedHash) -> Self {
+        Self::Package(PackageDependency::new(name, output, integrity))
+    }
+
+    pub fn file(integrity: SupportedHash) -> Self {
+        Self::File(FileDependency::new(integrity))
+    }
+
+    pub fn path(&self, store_directory: impl AsRef<Path>) -> PathBuf {
+        match self {
+            Dependency::Package(p) => p.path(store_directory),
+            Dependency::File(f) => f.path(store_directory),
+        }
+    }
+}
+
+impl StableHash for Dependency {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        match self {
+            Dependency::Package(p) => h.update_hash(1u8).update_hash(p),
+            Dependency::File(f) => h.update_hash(2u8).update_hash(f),
+        };
     }
 }
 
 #[derive(Debug)]
 pub struct SpecPaths<'a, 'b> {
-    base: String,
+    integrity: SupportedHash,
     spec: &'a Spec,
-    store_directory: &'b PathBuf,
+    store_directory: &'b Path,
 }
 
 impl<'a, 'b> SpecPaths<'a, 'b> {
     pub fn spec(&self) -> PathBuf {
-        self.store_directory.join(format!("{}.spec", self.base))
+        PackageDependency::format_path(
+            self.store_directory,
+            &self.spec.name,
+            self.integrity,
+            None::<&str>,
+        )
     }
 
     pub fn outputs<'c>(&'c self) -> SpecOutputPathsIterator<'a, 'b, 'c> {
@@ -227,18 +359,22 @@ impl<'a, 'b, 'c> Iterator for SpecOutputPathsIterator<'a, 'b, 'c> {
     fn next(&mut self) -> Option<Self::Item> {
         let next = self.paths.spec.outputs.get(self.index)?;
         self.index += 1;
-        let f = format!("{}-{}", self.paths.base, next);
-        Some((next.clone(), self.paths.store_directory.join(f)))
+        Some((
+            next.clone(),
+            PackageDependency::format_path(
+                self.paths.store_directory,
+                &self.paths.spec.name,
+                self.paths.integrity,
+                Some(next),
+            ),
+        ))
     }
 }
 
 /// A parsed action.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename = "action")]
+#[serde(rename = "action", tag = "action")]
 pub enum Action {
-    #[serde(rename = "fetch")]
-    /// Fetch a file.
-    Fetch(Fetch),
     #[serde(rename = "exec")]
     /// Execute a binary.
     Exec(Exec),
@@ -248,13 +384,12 @@ pub enum Action {
     #[serde(rename = "work_dir")]
     /// Set the working directory for subsequent commands.
     WorkDir(WorkDir),
+    /// Creates a link in the filesystem.
+    #[serde(rename = "link")]
+    Link(Link),
 }
 
 impl Action {
-    pub fn fetch(source: Option<Url>, integrity: SupportedHash) -> Self {
-        Self::Fetch(Fetch::new(source, integrity))
-    }
-
     pub fn exec(path: impl AsRef<Path>, args: Vec<OsString>) -> Self {
         Self::Exec(Exec::new(path, args))
     }
@@ -266,47 +401,9 @@ impl Action {
     pub fn work_dir(path: impl AsRef<Path>) -> Self {
         Self::WorkDir(WorkDir::new(path))
     }
-}
 
-impl StableHash for Action {
-    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
-        match self {
-            Action::Fetch(v) => h.update_hash(1u8).update_hash(v),
-            Action::Exec(v) => h.update_hash(2u8).update_hash(v),
-            Action::Set(v) => h.update_hash(3u8).update_hash(v),
-            Action::WorkDir(v) => h.update_hash(4u8).update_hash(v),
-        };
-    }
-}
-
-// Fetch a file from a URL.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(into = "ser::Fetch", try_from = "ser::Fetch")]
-pub struct Fetch {
-    /// The URL when the archive can be fetched from.
-    source: Option<Url>,
-    /// The hash of the archive.
-    integrity: SupportedHash,
-}
-
-impl StableHash for Fetch {
-    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
-        h.update_hash(self.source.as_ref().map(|f| f.as_str()))
-            .update_hash(self.integrity);
-    }
-}
-
-impl Fetch {
-    pub fn new(source: Option<Url>, integrity: SupportedHash) -> Self {
-        Self { source, integrity }
-    }
-
-    pub fn source(&self) -> Option<&Url> {
-        self.source.as_ref()
-    }
-
-    pub fn integrity(&self) -> SupportedHash {
-        self.integrity
+    pub fn link(from: impl AsRef<Path>, to: impl AsRef<Path>, flags: LinkFlags) -> Self {
+        Self::Link(Link::new(from, to, flags))
     }
 }
 
@@ -318,12 +415,6 @@ pub struct Exec {
     path: PathBuf,
     /// The arguments to pass to the binary.
     args: Vec<OsString>,
-}
-
-impl StableHash for Exec {
-    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
-        h.update_hash(&self.path).update_hash(&self.args);
-    }
 }
 
 impl Exec {
@@ -338,9 +429,7 @@ impl Exec {
         &self.path
     }
 
-    pub fn args(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &OsStr> + DoubleEndedIterator<Item = &OsStr> {
+    pub fn args(&self) -> impl Iterator<Item = &OsStr> + DoubleEndedIterator<Item = &OsStr> {
         self.args.iter().map(|f| f.as_os_str())
     }
 }
@@ -377,12 +466,6 @@ pub struct Set {
     value: Option<OsString>,
 }
 
-impl StableHash for Set {
-    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
-        h.update_hash(&self.name).update_hash(&self.value);
-    }
-}
-
 impl Set {
     pub fn new<V: AsRef<OsStr>>(name: impl AsRef<OsStr>, value: Option<V>) -> Self {
         let name = name.as_ref();
@@ -409,12 +492,6 @@ pub struct WorkDir {
     path: PathBuf,
 }
 
-impl StableHash for WorkDir {
-    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
-        h.update_hash(&self.path);
-    }
-}
-
 impl WorkDir {
     pub fn new(path: impl AsRef<Path>) -> Self {
         Self {
@@ -424,6 +501,43 @@ impl WorkDir {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+    pub struct LinkFlags: u16 {
+        const EXECUTABLE = 0b01;
+    }
+}
+
+/// Creates a symlink and any directories required to contain it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(into = "ser::Link", try_from = "ser::Link")]
+pub struct Link {
+    /// The file to link from.
+    from: PathBuf,
+    /// The file to link to.
+    to: PathBuf,
+    /// The flags to apply to the link.
+    flags: LinkFlags,
+}
+
+impl Link {
+    pub fn new(from: impl AsRef<Path>, to: impl AsRef<Path>, flags: LinkFlags) -> Self {
+        Self {
+            from: from.as_ref().into(),
+            to: to.as_ref().into(),
+            flags,
+        }
+    }
+
+    pub fn from(&self) -> &Path {
+        &self.from
+    }
+
+    pub fn to(&self) -> &Path {
+        &self.to
     }
 }
 
@@ -441,22 +555,35 @@ mod test {
         let spec = Spec::builder("test-1.0.0")
             .add_output("outa")
             .add_output("outb")
+            .link("/foo", "/test/foo", Some(super::LinkFlags::EXECUTABLE))
+            .package(
+                "foo-1.0",
+                "dev",
+                nck_hashing::SupportedHash::Blake3(*b"123456789012345678901234567890ab"),
+            )
+            .package(
+                "bar-1.0",
+                "out",
+                nck_hashing::SupportedHash::Blake3(*b"123456789012345678901234567890ef"),
+            )
+            .file(nck_hashing::SupportedHash::Blake3(
+                *b"123456789012345678901234567890cd",
+            ))
             .exec("/test/foo", vec!["--help".into()])
             .build()?;
 
-        let store_directory = "/some/store".into();
-        let paths = spec.paths(&store_directory, SupportedHasher::blake3());
+        let paths = spec.paths(&"/some/store", SupportedHasher::blake3());
 
         assert_eq!(
-            PathBuf::from("/some/store/test-1.0.0-blake3-bkstxebtpenmoi2ogr4piyrrdhtkzfg3aawngtycaahfjr5z4f2q.spec"),
+            PathBuf::from("/some/store/test-1.0.0-blake3-t7ujtbtj4sjaqkhffi5w5vpo2g3q5tem3geoygso5im37q5277ha.spec"),
             paths.spec()
         );
 
         let outputs: Vec<_> = paths.outputs().collect();
         assert_eq!(
             &[
-                ("outa".to_string(), PathBuf::from("/some/store/test-1.0.0-blake3-bkstxebtpenmoi2ogr4piyrrdhtkzfg3aawngtycaahfjr5z4f2q-outa")),
-                ("outb".to_string(), PathBuf::from("/some/store/test-1.0.0-blake3-bkstxebtpenmoi2ogr4piyrrdhtkzfg3aawngtycaahfjr5z4f2q-outb")),
+                ("outa".to_string(), PathBuf::from("/some/store/test-1.0.0-blake3-t7ujtbtj4sjaqkhffi5w5vpo2g3q5tem3geoygso5im37q5277ha-outa")),
+                ("outb".to_string(), PathBuf::from("/some/store/test-1.0.0-blake3-t7ujtbtj4sjaqkhffi5w5vpo2g3q5tem3geoygso5im37q5277ha-outb")),
             ],
             &outputs[..]
         );

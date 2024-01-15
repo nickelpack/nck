@@ -9,10 +9,10 @@ license = "MIT"
 nck-archive.workspace = true
 nck-hashing.workspace = true
 
-tokio = {workspace = true, features = ["io-util", "time", "sync", "rt", "net", "macros", "fs", "rt-multi-thread"]}
+tokio = { workspace = true, features = ["io-util", "time", "sync", "rt", "net", "macros", "fs", "rt-multi-thread"] }
 anyhow.workspace = true
 
-clap = {version = "4", default-features=false, features = ["std", "color", "help", "usage", "error-context", "suggestions", "derive"] }
-argfile = "0.1"
+clap = { workspace = true, features = ["std", "color", "help", "usage", "error-context", "suggestions", "derive"] }
+argfile.workspace = true
 # nickel-lang-core = "0.2.0"
 

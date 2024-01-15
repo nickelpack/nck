@@ -30,7 +30,7 @@ fn main() -> anyhow::Result<()> {
         .build()?
         .try_deserialize()?;
 
-    let controller = build::native::create_controller()?;
+    let controller = build::native::create_controller(settings.clone())?;
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

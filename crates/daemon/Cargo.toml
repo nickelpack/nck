@@ -39,14 +39,14 @@ petname = "1.1"
 rstest.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-procfs = "0.16"
-prctl = "1"
-signal-hook = "0.3"
-postcard = { version = "1.0", default-features = false, features = [ "use-std", "alloc" ] }
-which = "5"
+procfs.workspace = true
+prctl.workspace = true
+signal-hook.workspace = true
+postcard = { workspace = true, features = [ "use-std", "alloc" ] }
+which.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies.nix]
-version = "0.27"
+workspace = true
 features = [
   "mount",
   "fs",

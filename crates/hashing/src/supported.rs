@@ -44,9 +44,23 @@ impl StableHasher for SupportedHasher {
     }
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum SupportedHash {
     Blake3([u8; 32]),
+}
+
+impl Ord for SupportedHash {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (Self::Blake3(a), Self::Blake3(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl PartialOrd for SupportedHash {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 const PREFIX_BLAKE3: &str = "blake3-";

@@ -22,7 +22,7 @@ const PACKET_LENGTH_SIZE: usize = std::mem::size_of::<PacketLength>();
 
 /// This contains a list of file descriptors for use during serialization and deserialization.
 ///
-/// It basically exists to ensure that fds are cleand up if something fails.
+/// It basically exists to ensure that fds are cleaned up if something fails.
 #[derive(Debug)]
 struct FdQueue(VecDeque<i32>);
 

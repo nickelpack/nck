@@ -1,4 +1,5 @@
 mod archive;
+mod hash;
 
 use clap::{Parser, Subcommand};
 
@@ -19,6 +20,8 @@ struct Cli {
 enum Commands {
     #[command(about = "Manage nck archives.")]
     Archive(archive::Cli),
+    #[command(about = "Hash files.")]
+    Hash(hash::Hash),
 }
 
 #[tokio::main]
@@ -32,5 +35,6 @@ pub async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse_from(args);
     match cli.command {
         Commands::Archive(v) => v.execute().await,
+        Commands::Hash(v) => v.execute().await,
     }
 }

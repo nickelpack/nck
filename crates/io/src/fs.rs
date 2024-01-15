@@ -96,6 +96,13 @@ impl TempFile {
             Ok(())
         }
     }
+
+    #[cfg(target_os = "linux")]
+    pub async fn write_to(self, to: impl AsRef<Path>) -> Result<()> {
+        move_replace(&self.path, to.as_ref()).await?;
+        self.forget();
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for TempFile {
@@ -236,5 +243,54 @@ impl Deref for TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         self.delete_impl().ok();
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub async fn move_replace(from: &Path, to: &Path) -> Result<()> {
+    let f = from.to_path_buf();
+    let t = to.to_path_buf();
+    let out = tokio::runtime::Handle::current()
+        .spawn_blocking(move || nix::fcntl::renameat(None, &f, None, &t));
+
+    match out.await {
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(nix::Error::EINVAL)) | Ok(Err(nix::Error::EEXIST)) => {
+            // This can occur if the underlying FS doesn't support an atomic replace
+            move_replace_fallback(from, to).await
+        }
+        Ok(Err(e)) => Err(std::io::Error::from_raw_os_error(e as i32)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn move_replace_fallback(from: &Path, to: &Path) -> Result<()> {
+    match tokio::fs::rename(from, to).await {
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+
+    let stat = tokio::fs::symlink_metadata(to).await?;
+    let mut i = 0;
+    let next = loop {
+        let mut next = to.as_os_str().to_os_string();
+        next.push(format!(".old{i:x}"));
+        match tokio::fs::rename(to, &next).await {
+            Ok(_) => break next,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => i += 1,
+            Err(e) => return Err(e),
+        }
+    };
+
+    let next: PathBuf = next.into();
+    match tokio::fs::rename(from, to).await {
+        Ok(_) if stat.is_dir() => tokio::fs::remove_dir_all(next).await,
+        Ok(_) => tokio::fs::remove_file(next).await,
+        Err(e) => {
+            tokio::fs::rename(next, to).await?;
+            Err(e)
+        }
     }
 }

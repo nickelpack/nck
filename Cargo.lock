@@ -1221,6 +1221,7 @@ name = "nck-io"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "nix",
  "rand",
  "tokio",
 ]
@@ -1230,12 +1231,14 @@ name = "nck-spec"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitflags 2.4.1",
  "blake3",
  "bytes",
  "nck-hashing",
  "nck-io",
  "pretty_assertions",
  "serde",
+ "serde_json",
  "serde_test",
  "thiserror",
  "toml 0.8.8",

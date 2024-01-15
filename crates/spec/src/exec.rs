@@ -1,22 +1,45 @@
 use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
 
-use nck_hashing::SupportedHash;
-use url::Url;
+use nck_hashing::{StableHash, StableHasherExt};
 
-use crate::Action;
+use crate::{Action, LinkFlags};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecutionAction {
-    Fetch {
-        source: Option<Url>,
-        integrity: SupportedHash,
-    },
     Exec {
         path: PathBuf,
         args: Vec<OsString>,
         env: Vec<(OsString, OsString)>,
         work_dir: PathBuf,
     },
+    Link {
+        from: PathBuf,
+        to: PathBuf,
+        flags: LinkFlags,
+    },
+}
+
+impl StableHash for ExecutionAction {
+    fn update<H: nck_hashing::StableHasher>(&self, h: &mut H) {
+        match self {
+            ExecutionAction::Exec {
+                path,
+                args,
+                env,
+                work_dir,
+            } => h
+                .update_hash(1u8)
+                .update_hash(path)
+                .update_iter(args.iter())
+                .update_iter(env.iter())
+                .update_hash(work_dir),
+            ExecutionAction::Link { from, to, flags } => h
+                .update_hash(2u8)
+                .update_hash(from)
+                .update_hash(to)
+                .update_hash(flags.bits()),
+        };
+    }
 }
 
 pub struct ExecutionIterator<'a> {
@@ -38,10 +61,11 @@ impl<'a> Iterator for ExecutionIterator<'a> {
             }
 
             match self.spec.first()? {
-                crate::Action::Fetch(fetch) => {
-                    return Some(ExecutionAction::Fetch {
-                        source: fetch.source.clone(),
-                        integrity: fetch.integrity,
+                crate::Action::Link(link) => {
+                    return Some(ExecutionAction::Link {
+                        from: link.from.clone(),
+                        to: link.to.clone(),
+                        flags: link.flags,
                     })
                 }
                 crate::Action::Exec(exec) => {
@@ -77,11 +101,13 @@ mod test {
     fn exec() -> anyhow::Result<()> {
         let spec = Spec::builder("test")
             .add_output("out")
-            .exec("/bin/test", vec!["hello".into(), "world".into()])
-            .fetch(
-                Some("https://www.example.com".parse()?),
-                "blake3-awoddymtijbosmenspc5ml64fvsmshe7fuecdyitferqilkudhla".parse()?,
+            .link(
+                "/var/nck/store/files/abc123",
+                "/bin/test1",
+                Some(crate::LinkFlags::EXECUTABLE),
             )
+            .link("/var/nck/store/files/foo", "/bin/test", None)
+            .exec("/bin/test", vec!["hello".into(), "world".into()])
             .work_dir("/test")
             .set("value", Some("value2"))
             .set("test", Some("value"))
@@ -95,16 +121,21 @@ mod test {
 
         assert_eq!(
             &[
+                ExecutionAction::Link {
+                    from: "/var/nck/store/files/abc123".into(),
+                    to: "/bin/test1".into(),
+                    flags: crate::LinkFlags::EXECUTABLE
+                },
+                ExecutionAction::Link {
+                    from: "/var/nck/store/files/foo".into(),
+                    to: "/bin/test".into(),
+                    flags: crate::LinkFlags::empty()
+                },
                 ExecutionAction::Exec {
                     path: "/bin/test".into(),
                     args: vec!["hello".into(), "world".into()],
                     env: vec![],
                     work_dir: "/".into()
-                },
-                ExecutionAction::Fetch {
-                    source: Some("https://www.example.com".parse()?),
-                    integrity: "blake3-awoddymtijbosmenspc5ml64fvsmshe7fuecdyitferqilkudhla"
-                        .parse()?
                 },
                 ExecutionAction::Exec {
                     path: "/bin/foo".into(),

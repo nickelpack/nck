@@ -9,7 +9,7 @@ use nix::{
         signal::Signal,
         wait::{waitpid, WaitPidFlag},
     },
-    unistd::Pid,
+    unistd::{setresgid, setresuid, Gid, Pid, Uid},
 };
 
 pub mod main_process;
@@ -21,8 +21,13 @@ const CHILD_DROP_WAIT: Duration = Duration::from_secs(5);
 
 /// Kills a child process (first with SIGINT, then with SIGKILL if it takes more than 5 seconds) when this value is
 /// dropped.
-#[derive(Debug)]
 pub struct ChildProcess(RefCell<Option<Pid>>);
+
+impl std::fmt::Debug for ChildProcess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.borrow().fmt(f)
+    }
+}
 
 impl From<Pid> for ChildProcess {
     fn from(value: Pid) -> Self {
@@ -133,4 +138,20 @@ impl ChildProcess {
         Self::kill(pid, Signal::SIGKILL)?;
         Ok(())
     }
+}
+
+#[tracing::instrument(level = "trace", skip_all)]
+fn set_id(uid: Uid, gid: Gid, supplementary: impl AsRef<[Gid]>) -> nix::Result<()> {
+    let supplementary = supplementary.as_ref();
+
+    if !supplementary.is_empty() {
+        tracing::trace!(?supplementary, "setting supplementary groups");
+        nix::unistd::setgroups(supplementary)?;
+    }
+    tracing::trace!(?gid, "setting gids");
+    setresgid(gid, gid, gid)?;
+    tracing::trace!(?uid, "setting uids");
+    setresuid(uid, uid, uid)?;
+
+    Ok(())
 }

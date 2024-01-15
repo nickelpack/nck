@@ -4,10 +4,13 @@ use nix::sched::CloneFlags;
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::build::linux::{
-    channel::{self, AsyncChannel, ChannelError, PendingChannel, PendingChannelError},
-    fork,
-    user_ns::{LinuxIdMapping, UserNamespaceConfig, UserNamespaceError},
+use crate::{
+    build::linux::{
+        channel::{self, AsyncChannel, ChannelError, PendingChannel, PendingChannelError},
+        fork,
+        user_ns::{LinuxIdMapping, UserNamespaceConfig, UserNamespaceError},
+    },
+    settings::{DaemonSettings, StoreSettings},
 };
 
 use super::{
@@ -16,12 +19,18 @@ use super::{
     ChildProcess,
 };
 
-pub fn main_process() -> anyhow::Result<PendingController> {
+pub fn main_process(
+    store_settings: StoreSettings,
+    daemon_settings: DaemonSettings,
+) -> anyhow::Result<PendingController> {
     let (parent, child) = channel::unix_pair()?;
-    let cb = Box::new(move || super::zygote_process::zygote_process(child.clone()));
+    let cb = Box::new(move || {
+        super::zygote_process::zygote_process(store_settings.clone(), child.clone())
+    });
     let zygote: ChildProcess = fork::clone(cb, CloneFlags::empty())?.into();
 
     Ok(PendingController {
+        daemon_settings,
         _zygote: zygote,
         channel: parent,
     })
@@ -35,6 +44,7 @@ pub fn main_process() -> anyhow::Result<PendingController> {
 pub struct PendingController {
     _zygote: ChildProcess,
     channel: PendingChannel<ZygoteRequest, ZygoteResponse>,
+    daemon_settings: DaemonSettings,
 }
 
 impl PendingController {
@@ -42,6 +52,7 @@ impl PendingController {
         Ok(Controller(Arc::new(Mutex::new(ControllerState {
             _zygote: self._zygote,
             channel: self.channel.into_peer_async().await?,
+            daemon_settings: self.daemon_settings,
         }))))
     }
 }
@@ -50,6 +61,7 @@ impl PendingController {
 struct ControllerState {
     _zygote: ChildProcess,
     channel: AsyncChannel<ZygoteRequest, ZygoteResponse>,
+    daemon_settings: DaemonSettings,
 }
 
 #[derive(Debug)]
@@ -76,10 +88,18 @@ impl Controller {
         let mut user_namespace_config = UserNamespaceConfig::new()?;
         user_namespace_config
             .uid_mappings_mut()
-            .push(LinuxIdMapping::new(0, 10000, 1));
+            .push(LinuxIdMapping::new(
+                0,
+                s.daemon_settings.linux.sub_uid.min,
+                1,
+            ));
         user_namespace_config
             .gid_mappings_mut()
-            .push(LinuxIdMapping::new(0, 10000, 1));
+            .push(LinuxIdMapping::new(
+                0,
+                s.daemon_settings.linux.sub_gid.min,
+                1,
+            ));
 
         let (sandbox_peer, local_sandbox_peer) = channel::unix_pair()?;
         let sandbox_channel = local_sandbox_peer.into_peer_async().await?;

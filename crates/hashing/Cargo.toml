@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde = {workspace = true, features = ["derive"]}
+serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 blake3.workspace = true
 
-data-encoding = { version = "2.5.0", default-features = false }
-data-encoding-macro = "0.1.14"
+data-encoding.workspace = true
+data-encoding-macro.workspace = true
