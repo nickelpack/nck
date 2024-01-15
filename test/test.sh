@@ -4,55 +4,122 @@ set -euo pipefail
 pwd=$(pwd)
 host=http://socket
 
+fetch() {
+  echo curl "$@" >&2
+  curl "$@"
+}
+
 req() {
-  curl -si --unix-socket /var/nck/daemon.sock "$@"
+  fetch -si --unix-socket /var/nck/daemon.sock "$@" | sed 's#\r##g'
 }
 
 upload_file() {
   local file=$1
-  local uploaded_file=$(req -X POST "${host}${formula_url}/upload" --data-binary "@-" < "$file" | sed 's#\r##g')
+  local uploaded_file=$(req -X POST "${host}${formula_url}/file" --data-binary "@-" < "$file")
   awk -v FS=': ' '/^etag/{print $2}' <<< "$uploaded_file" | sed -e 's#^"##' -e 's#"$##'
+}
+
+fetch_file() {
+  local src=$1
+  local int=$2
+  if [ ! -e "/var/nck/store/files/$int" ]; then
+    fetch "$src" -o /tmp/src
+    local uploaded_file=$(req -X POST "${host}${formula_url}/file" --data-binary "@/tmp/src" -H "If-None-Match: \"${int}\"")
+    awk -v FS=': ' '/^etag/{print $2}' <<< "$uploaded_file" | sed -e 's#^"##' -e 's#"$##'
+  else
+    echo "$int"
+  fi
 }
 
 encode() {
   jq -rn --arg x "$0" '$x|@uri'
 }
 
-extract_file() {
-  local source=$(upload_file "$1")
-  local dest=$2
-  local de=$3
-  local encoded=$(encode "$dest")
-  local result=$(
-    req -X POST "${host}${formula_url}/action/extract" \
-      --form "source=${source}" \
-      --form "dest=${dest}" \
-      --form "compression=${de}" \
-      | sed 's#\r##g'
-  )
-  echo "$source: $result"
-}
-
-req -v -X POST "$host/api/1/spec"
-
-create_formula_response=$(req -X POST "$host/api/1/spec" | sed 's#\r##g')
-echo "$create_formula_response"
+create_formula_response=$(req -X POST "$host/api/1/build")
 formula_url=$(awk -v FS=": " '/^location/{print $2}' <<< "$create_formula_response")
 echo "-- $formula_url --" 1>&2
 
-extract_file "rootfs.nck.zst" "/" "zstd"
+echo "uploading rootfs"
+integrity=$(upload_file "rootfs.tar.gz")
 
-echo "#!/bin/bash" > script
-echo "/support/tar -xvf /rootfs.tar" >> script
+echo "uploading tar"
+tar_url="https://busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox_TAR"
+tar_int="blake3-43bvwtdwfeaxy6hfq4mohwlwbl73pr52tntlidmdlpnl2uzmsqhq"
 
-req -X POST "${host}${formula_url}/action/execute" \
-  --form "bin=/support/run" \
-  --form "env[TMP]=/tmp" \
-  --form "env[TMPDIR]=/tmp" \
-  --form "env[TEMP]=/tmp" \
-  --form "env[TEMPDIR]=/tmp" \
-  --form "env[HOME]=/no-home" \
-  --form "env[TERM]=xterm-256color" \
-  --form "env[PATH]=/bin:/usr/bin:/sbin:/usr/sbin"
+fetch_file "$tar_url" "$tar_int"
 
-req -X POST "${host}${formula_url}/run"
+echo "uploading gzip"
+gunzip_url="https://www.busybox.net/downloads/binaries/1.35.0-x86_64-linux-musl/busybox_GUNZIP"
+gunzip_int="blake3-7h32xiopodjandasbz7vefv4pfl7ble377xr7nfcoqiuzdcj4upq"
+
+fetch_file "$gunzip_url" "$gunzip_int"
+
+request="{
+  \"name\": \"bootstrap-0.0.1\",
+  \"outputs\": [ \"out\" ],
+  \"files\": [
+    \"${integrity}\",
+    \"${tar_int}\",
+    \"${gunzip_int}\"
+  ],
+  \"actions\": [
+    {
+      \"action\": \"set\",
+      \"name\": \"TMP\",
+      \"value\": \"/tmp\"
+    },
+    {
+      \"action\": \"set\",
+      \"name\": \"TMPDIR\",
+      \"value\": \"/tmp\"
+    },
+    {
+      \"action\": \"set\",
+      \"name\": \"TEMP\",
+      \"value\": \"/tmp\"
+    },
+    {
+      \"action\": \"set\",
+      \"name\": \"TEMPDIR\",
+      \"value\": \"/tmp\"
+    },
+    {
+      \"action\": \"set\",
+      \"name\": \"HOME\",
+      \"value\": \"/no-home\"
+    },
+    {
+      \"action\": \"set\",
+      \"name\": \"TERM\",
+      \"value\": \"xterm-256color\"
+    },
+    {
+      \"action\": \"set\",
+      \"name\": \"PATH\",
+      \"value\": \"/bin:/usr/bin:/sbin:/usr/sbin:/tmp/busybox\"
+    },
+    {
+      \"action\": \"work_dir\",
+      \"path\": \"/\"
+    },
+    {
+      \"action\": \"link\",
+      \"from\": \"/var/nck/store/files/${tar_int}\",
+      \"to\": \"/tmp/busybox/tar\",
+      \"executable\": true
+    },
+    {
+      \"action\": \"link\",
+      \"from\": \"/var/nck/store/files/${gunzip_int}\",
+      \"to\": \"/tmp/busybox/gunzip\",
+      \"executable\": true
+    },
+    {
+      \"action\": \"exec\",
+      \"path\": \"/tmp/busybox/tar\",
+      \"args\": [ \"-xzf\", \"/var/nck/store/files/${integrity}\" ]
+    }
+  ]
+}"
+
+req -X POST "${host}${formula_url}/run" --data "$request" -H "Content-Type: application/json"
