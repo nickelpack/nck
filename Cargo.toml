@@ -47,6 +47,8 @@ castaway = "0.2.2"
 rstest = "0.18.2"
 pretty_assertions = "1.4.0"
 
+nickel-lang-core = "0.4.0"
+
 nck-io = { path = "./crates/io" }
 nck-hashing = { path = "./crates/hashing" }
 nck-archive = { path = "./crates/archive" }
