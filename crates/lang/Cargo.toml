@@ -1,0 +1,12 @@
+[package]
+name = "nck-lang"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+pretty_assertions.workspace = true
+thiserror.workspace = true
+
+pest = "2.7.6"
+pest_derive = "2.7.6"

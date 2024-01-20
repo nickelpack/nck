@@ -1,0 +1,47 @@
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+main = _{
+	SOI
+	~ expression
+	~ EOI
+}
+
+number = @{
+	ASCII_DIGIT+
+	~
+	("." ~ ASCII_DIGIT+)?
+}
+
+ident = ${ interpolated | ident_literal }
+ident_literal = @{ ident_start_chars ~ ident_chars* }
+ident_start_chars = @{ "`" | ASCII_ALPHA_LOWER }
+ident_chars = @{ ASCII_ALPHA | ASCII_DIGIT | "_" | "-" }
+
+tag = ${ tag_start_chars ~ tag_chars* }
+tag_start_chars = @{ ASCII_ALPHA_UPPER }
+tag_chars = @{ ASCII_ALPHA | ASCII_DIGIT }
+
+quoted_string = @{ "\"" ~ quoted_opt* ~ "\"" }
+quoted_opt = _{ interpolated | quoted_run }
+quoted_run = ${ quoted_inner+ }
+quoted_inner = _{
+    !("\"" | "\\" | "\n") ~ ANY
+    | "\\" ~ ("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t")
+    | "\\" ~ ("u" ~ ASCII_HEX_DIGIT{4})
+    | "\\" ~ ("x" ~ ASCII_HEX_DIGIT{2})
+}
+
+multi_string = @{ "''\n" ~ multi_opt* ~ multi_run ~ "''" }
+multi_opt = @{ multi_run ~ (interpolated | multi_run_newline) }
+multi_run_newline = ${ "\n" }
+multi_run = ${ multi_inner* }
+multi_inner = _{
+    !("''" | "\\" | "\n") ~ ANY
+    | "\\" ~ ("''" | "\\" | "/" | "b" | "f" | "n" | "r" | "t" | interpolated)
+    | "\\" ~ ("u" ~ ASCII_HEX_DIGIT{4})
+    | "\\" ~ ("x" ~ ASCII_HEX_DIGIT{2})
+}
+
+interpolated = !{ "\\(" ~ expression ~ ")" }
+
+expression = !{ number | quoted_string | multi_string | ident | tag }
