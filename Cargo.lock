@@ -1218,8 +1218,7 @@ name = "nck-lang"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "pest",
- "pest_derive",
+ "bumpalo",
  "pretty_assertions",
  "thiserror",
 ]

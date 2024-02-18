@@ -7,6 +7,5 @@ edition = "2021"
 anyhow.workspace = true
 pretty_assertions.workspace = true
 thiserror.workspace = true
+bumpalo = { workspace = true, features = ["allocator_api", "collections"] }
 
-pest = "2.7.6"
-pest_derive = "2.7.6"
