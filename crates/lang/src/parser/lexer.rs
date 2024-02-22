@@ -2,7 +2,7 @@ use std::{
     fmt::Display,
     iter::Peekable,
     ops::{Range, RemAssign},
-    path::PathBuf,
+    path::{Path, PathBuf},
     str::CharIndices,
 };
 
@@ -27,21 +27,10 @@ pub enum TokenKind<'bump> {
     Eof,
     Ident(&'bump str),
     String(&'bump str),
+    InterpolationStart,
+    InterpolationEnd,
+    Error(ErrorKind<'bump>),
 }
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct Error<'bump> {
-    loc: Location<'bump>,
-    kind: ErrorKind<'bump>,
-}
-
-impl<'bump> Display for Error<'bump> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Display::fmt(&self.kind, f)
-    }
-}
-
-impl<'bump> std::error::Error for Error<'bump> {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ErrorKind<'bump> {
@@ -65,22 +54,18 @@ struct LocationRef {
     offset: usize,
 }
 
-pub struct Lexer<'src, 'bump> {
+struct Lexer<'src, 'bump> {
     val: &'src str,
     bump: &'bump Bump,
-    iter: CharIndices<'src>,
     loc: LocationRef,
     path: PathBuf,
     working: std::string::String,
-    state: State,
+    result: Vec<Token<'bump>>,
 }
 
-enum State {
-    Root,
-    String,
+pub fn lex<'bump>(path: impl AsRef<Path>, s: &str, bump: &'bump Bump) -> &'bump [Token<'bump>] {
+    Lexer::new(path.as_ref().to_owned(), s, bump).lex()
 }
-
-type LexerResult<'bump, T = Token<'bump>, E = Error<'bump>> = Result<T, E>;
 
 impl<'src, 'bump> Lexer<'src, 'bump> {
     pub fn new(path: PathBuf, s: &'src str, bump: &'bump Bump) -> Self {
@@ -93,9 +78,8 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
                 offset: 0,
             },
             path,
-            iter: s.char_indices(),
             working: std::string::String::new(),
-            state: State::Root,
+            result: Vec::new(),
         }
     }
 
@@ -107,8 +91,8 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
     }
 
     #[inline(always)]
-    fn token(&self, start: LocationRef, end: usize, kind: TokenKind<'bump>) -> Token<'bump> {
-        Token {
+    fn token(&mut self, start: LocationRef, end: usize, kind: TokenKind<'bump>) {
+        self.result.push(Token {
             loc: Location::new_in(
                 self.clamp(start.offset..end),
                 start.line,
@@ -117,38 +101,35 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
                 self.bump,
             ),
             kind,
-        }
+        });
     }
 
     #[inline(always)]
-    fn token_at_offset(&self, start: LocationRef, kind: TokenKind<'bump>) -> Token<'bump> {
+    fn token_at_offset(&mut self, start: LocationRef, kind: TokenKind<'bump>) {
         self.token(start, self.loc.offset, kind)
     }
 
     #[inline(always)]
-    fn error(&self, start: LocationRef, end: usize, kind: ErrorKind<'bump>) -> Error<'bump> {
-        Error {
-            loc: Location::new_in(
-                self.clamp(start.offset..end),
-                start.line,
-                start.col,
-                &self.path,
-                self.bump,
-            ),
-            kind,
-        }
+    fn error(&mut self, start: LocationRef, end: usize, kind: ErrorKind<'bump>) {
+        self.token(start, end, TokenKind::Error(kind))
     }
 
     #[inline(always)]
-    fn error_at_offset(&self, start: LocationRef, kind: ErrorKind<'bump>) -> Error<'bump> {
-        self.error(start, self.loc.offset, kind)
+    fn error_at_offset(&mut self, start: LocationRef, kind: ErrorKind<'bump>) {
+        self.token_at_offset(start, TokenKind::Error(kind))
     }
 
     #[inline(always)]
-    fn alloc_str(&mut self) -> &'bump str {
+    fn alloc_working(&mut self) -> &'bump str {
         let result = self.bump.alloc_str(&self.working);
         self.working.clear();
         result
+    }
+
+    #[inline(always)]
+    fn alloc_str(&self, start: LocationRef) -> &'bump str {
+        self.bump
+            .alloc_str(&self.val[start.offset..self.loc.offset])
     }
 
     #[inline(always)]
@@ -159,11 +140,6 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
     #[inline(always)]
     fn nth_char(&self, n: usize) -> Option<char> {
         self.remainder().chars().nth(n)
-    }
-
-    #[inline(always)]
-    fn starts_with(&self, value: &str) -> bool {
-        self.remainder().starts_with(value)
     }
 
     #[inline(always)]
@@ -180,8 +156,6 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
         self.loc.offset += len;
 
         let remainder = &self.val[start.offset..self.loc.offset];
-        self.iter = self.val[self.loc.offset..].char_indices();
-
         for c in remainder.chars() {
             if c == '\n' {
                 self.loc.line += 1;
@@ -196,8 +170,13 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
 
     #[inline(always)]
     fn match_start(&mut self, value: &str) -> bool {
-        if !self.starts_with(value) {
+        if !self.remainder().starts_with(value) {
             return false;
+        }
+
+        if self.loc.offset >= self.val.len() {
+            // Allow loops to terminate
+            return true;
         }
 
         self.advance_by(value.len()).is_some()
@@ -220,25 +199,69 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
         remainder.find(pat).and_then(|i| self.advance_by(i))
     }
 
-    pub fn next_token(&mut self) -> LexerResult<'bump> {
-        match self.nth_char(0) {
-            Some('"') => self.take_string("\""),
-            _ => Ok(self.token(self.loc, self.loc.offset, TokenKind::Eof)),
+    #[inline(always)]
+    fn take_whitespace(&mut self) {
+        while let Some(c) = self.nth_char(0) {
+            if c.is_whitespace() {
+                self.advance_by(1);
+            } else {
+                break;
+            }
         }
     }
 
-    fn take_string(&mut self, terminator: &str) -> LexerResult<'bump> {
+    #[inline(always)]
+    fn string_token(&mut self, start: LocationRef) {
+        if !self.working.is_empty() {
+            let s = self.alloc_working();
+            self.token_at_offset(start, TokenKind::String(s));
+        }
+    }
+
+    pub fn lex(mut self) -> &'bump [Token<'bump>] {
+        while !self.remainder().is_empty() {
+            self.root();
+        }
+        self.bump.alloc_slice_fill_iter(self.result)
+    }
+
+    fn root(&mut self) {
+        self.take_whitespace();
+        match self.nth_char(0) {
+            Some('"') => self.take_string("\""),
+            Some(c) if c.is_alphabetic() || c == '`' => self.take_ident(),
+            _ => todo!(),
+        }
+        self.take_whitespace();
+    }
+
+    fn take_ident(&mut self) {
         let start = self.loc;
+
+        self.match_start("`");
+        let actual_start = self.loc;
+        while let Some(c) = self.nth_char(0) {
+            if !c.is_alphabetic() {
+                break;
+            }
+            self.advance_by(1);
+        }
+
+        self.token_at_offset(start, TokenKind::Ident(self.alloc_str(actual_start)))
+    }
+
+    fn take_string(&mut self, terminator: &str) {
+        let mut start = self.loc;
         self.match_start(terminator);
         while let Some(c) = self.nth_char(0) {
             match c {
                 '\\' => {
                     self.advance_by(1);
-                    self.take_string_escape(terminator)?;
+                    self.take_string_escape(&mut start, terminator);
                 }
                 _ if self.match_start(terminator) => {
-                    let s = self.alloc_str();
-                    return Ok(self.token_at_offset(start, TokenKind::String(s)));
+                    self.string_token(start);
+                    return;
                 }
                 c => {
                     self.working.push(c);
@@ -246,33 +269,29 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
                 }
             }
         }
-        Err(self.error_at_offset(
+        self.error_at_offset(
             start,
             ErrorKind::UnterminatedString(self.bump.alloc_str(terminator)),
-        ))
+        );
     }
 
-    fn take_string_escape(&mut self, terminator: &str) -> LexerResult<'bump, ()> {
+    fn take_string_escape(&mut self, start: &mut LocationRef, terminator: &str) {
         match self.nth_char(0) {
             Some('"') => {
                 self.working.push('\"');
-                Ok(())
             }
             Some('n') => {
                 self.working.push('\n');
-                Ok(())
             }
             Some('r') => {
                 self.working.push('\r');
-                Ok(())
             }
             Some('t') => {
                 self.working.push('\t');
-                Ok(())
             }
             Some('u' | 'x') => {
                 let escape = self.loc;
-                let (_, val) = if self.match_start("u{") {
+                let val = if self.match_start("u{") {
                     self.take_until("}").inspect(|_| {
                         self.advance_by(1);
                     })
@@ -280,22 +299,31 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
                     self.take_len(2)
                 } else {
                     None
+                };
+
+                if let Some((_, val)) = val {
+                    self.parse_unicode(escape, val);
                 }
-                .ok_or_else(|| self.error_at_offset(escape, ErrorKind::BadEscapeSequence))?;
-                let val = self.parse_unicode(escape, val)?;
-                self.working.push(val);
-                Ok(())
             }
-            _ => Err(self.error_at_offset(self.loc, ErrorKind::BadEscapeSequence)),
+            Some('(') => {
+                self.string_token(*start);
+                self.match_start("(");
+                self.take_whitespace();
+                while !self.match_start(")") {
+                    self.root();
+                }
+                *start = self.loc;
+            }
+            _ => self.error_at_offset(self.loc, ErrorKind::BadEscapeSequence),
         }
     }
 
-    fn parse_unicode(&self, start: LocationRef, val: &'src str) -> LexerResult<'bump, char> {
-        let val = u32::from_str_radix(val, 16)
-            .map_err(|_| self.error_at_offset(start, ErrorKind::BadEscapeSequence))?;
-        let val = char::from_u32(val)
-            .ok_or_else(|| self.error_at_offset(start, ErrorKind::BadEscapeSequence))?;
-        Ok(val)
+    fn parse_unicode(&mut self, start: LocationRef, val: &'src str) {
+        if let Some(val) = u32::from_str_radix(val, 16).ok().and_then(char::from_u32) {
+            self.working.push(val);
+        } else {
+            self.error_at_offset(start, ErrorKind::BadEscapeSequence);
+        }
     }
 }
 
@@ -306,21 +334,60 @@ mod test {
 
     use bumpalo::Bump;
 
-    use crate::parser::{lexer::Token, Location};
+    use crate::parser::{
+        lexer::{lex, Token, TokenKind},
+        Location,
+    };
 
     #[test]
     pub fn lex_unicode_escape() {
         let bump = Bump::new();
         let path = PathBuf::from("-");
 
-        let mut lexer = super::Lexer::new(path.clone(), r#""test \u{7FFF}""#, &bump);
-        let token = lexer.next_token().unwrap();
         assert_eq!(
-            token,
-            Token::new(
+            lex(path.clone(), r#""test \u{7FFF}""#, &bump),
+            &[Token::new(
                 Location::new_in(0..15, 0, 0, &path, &bump),
                 crate::parser::lexer::TokenKind::String("test \u{7FFF}")
-            )
+            )]
+        );
+    }
+
+    #[test]
+    pub fn lex_ident() {
+        let bump = Bump::new();
+        let path = PathBuf::from("-");
+
+        assert_eq!(
+            lex(path.clone(), r#"foo"#, &bump),
+            &[Token::new(
+                Location::new_in(0..3, 0, 0, &path, &bump),
+                TokenKind::Ident("foo")
+            )]
+        );
+    }
+
+    #[test]
+    pub fn lex_inter_ident() {
+        let bump = Bump::new();
+        let path = PathBuf::from("-");
+
+        assert_eq!(
+            lex(path.clone(), r#""foo\(bar)test""#, &bump),
+            &[
+                Token::new(
+                    Location::new_in(0..15, 0, 0, &path, &bump),
+                    TokenKind::String("foo")
+                ),
+                Token::new(
+                    Location::new_in(6..15, 0, 6, &path, &bump),
+                    TokenKind::Ident("bar")
+                ),
+                Token::new(
+                    Location::new_in(10..15, 0, 10, &path, &bump),
+                    TokenKind::String("test")
+                )
+            ]
         );
     }
 }
