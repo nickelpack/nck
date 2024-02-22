@@ -1,3 +1,7 @@
+// Having a lexer return data through an iterator is an extremely interesting *academic* problem these days. Nearly all
+// parsing frameworks that I have come across read the entire file up-front, rendering much of the iterative lexing
+// pointless. Here we lex to a vec. Simple, probably faster.
+
 use std::{
     fmt::Display,
     iter::Peekable,
