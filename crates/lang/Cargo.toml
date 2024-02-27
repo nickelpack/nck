@@ -7,5 +7,8 @@ edition = "2021"
 anyhow.workspace = true
 pretty_assertions.workspace = true
 thiserror.workspace = true
+bitflags.workspace = true
 bumpalo = { workspace = true, features = ["allocator_api", "collections"] }
 
+[dev-dependencies]
+once_cell.workspace = true

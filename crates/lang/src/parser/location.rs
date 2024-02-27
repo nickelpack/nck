@@ -12,7 +12,7 @@ struct Loc {
     col: usize,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location<'bump> {
     loc: &'bump Loc,
     path: &'bump PathBuf,
@@ -23,11 +23,10 @@ impl<'bump> Location<'bump> {
         range: Range<usize>,
         line: usize,
         col: usize,
-        path: &Path,
+        path: &'bump PathBuf,
         bump: &'bump Bump,
     ) -> Self {
         let loc = bump.alloc_with(|| Loc { range, line, col });
-        let path = bump.alloc_with(|| path.to_path_buf());
         Self { loc, path }
     }
 
