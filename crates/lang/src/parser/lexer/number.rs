@@ -1,4 +1,4 @@
-use super::{ErrorKind, LocationRef, Node, NodeKind, NodeParser, Scanner};
+use super::{ErrorKind, Lexer, LocationRef, Scanner, Token, TokenKind, TokenLexer};
 
 enum NumberValue {
     Integer(i64),
@@ -12,8 +12,8 @@ pub struct Number<'src, 'bump> {
     value: NumberValue,
 }
 
-impl<'src, 'bump> NodeParser<'src, 'bump> for Number<'src, 'bump> {
-    fn parse(mut scanner: Scanner<'src, 'bump>) -> Option<Self> {
+impl<'src, 'bump> TokenLexer<'src, 'bump> for Number<'src, 'bump> {
+    fn lex(_: &Lexer<'src, 'bump>, mut scanner: Scanner<'src, 'bump>) -> Option<Self> {
         let start = scanner.location();
         if scanner.match_start("0x") || scanner.match_start("0X") {
             Some(Self::take_radix_num(
@@ -44,18 +44,18 @@ impl<'src, 'bump> NodeParser<'src, 'bump> for Number<'src, 'bump> {
         matches!(self.value, NumberValue::Err)
     }
 
-    fn accept(self, next_location: &mut Scanner<'src, 'bump>) -> Result<Node<'bump>, Node<'bump>> {
+    fn accept(self, next_location: &mut Lexer<'src, 'bump>) -> Result<Token<'bump>, Token<'bump>> {
         match self.value {
             NumberValue::Integer(i) => {
-                Ok(next_location.node(self.scanner, self.start, NodeKind::Integer(i)))
+                Ok(next_location.token(self.scanner, self.start, TokenKind::Integer(i)))
             }
             NumberValue::Float(f) => {
-                Ok(next_location.node(self.scanner, self.start, NodeKind::Float(f)))
+                Ok(next_location.token(self.scanner, self.start, TokenKind::Float(f)))
             }
-            NumberValue::Err => Err(next_location.node(
+            NumberValue::Err => Err(next_location.token(
                 self.scanner,
                 self.start,
-                NodeKind::Error(ErrorKind::InvalidNumberLiteral),
+                TokenKind::Error(ErrorKind::InvalidNumberLiteral),
             )),
         }
     }
@@ -212,9 +212,9 @@ impl<'src, 'bump> Number<'src, 'bump> {
 mod test {
     use bumpalo::Bump;
 
-    use crate::parser::{
-        test::{make_error, make_token, test_parser},
-        ErrorKind, NodeKind,
+    use crate::parser::lexer::{
+        test::{make_error, make_token, test_lexer},
+        ErrorKind, TokenKind,
     };
 
     use pretty_assertions::assert_eq;
@@ -234,14 +234,14 @@ mod test {
     #[test]
     fn no_number() {
         let bump = Bump::new();
-        let r = test_parser::<Number>(r#"abc"#, &bump);
+        let r = test_lexer::<Number>(r#"abc"#, &bump);
         assert_eq!(r, None);
     }
 
     #[test]
     fn no_float_number() {
         let bump = Bump::new();
-        let r = test_parser::<Number>(r#".abc"#, &bump);
+        let r = test_lexer::<Number>(r#".abc"#, &bump);
         assert_eq!(r, None);
     }
 
@@ -249,7 +249,7 @@ mod test {
     fn bad_hex() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"0xZ"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"0xZ"#, bump).unwrap();
         assert_eq!(
             r,
             (
@@ -263,7 +263,7 @@ mod test {
     fn bad_oct() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"0o8"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"0o8"#, bump).unwrap();
         assert_eq!(
             r,
             (
@@ -277,7 +277,7 @@ mod test {
     fn bad_bin() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"0b2"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"0b2"#, bump).unwrap();
         assert_eq!(
             r,
             (
@@ -291,7 +291,7 @@ mod test {
     fn bad_float_1() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"04ea"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"04ea"#, bump).unwrap();
         assert_eq!(
             r,
             (
@@ -305,7 +305,7 @@ mod test {
     fn bad_float_2() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"04e__"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"04e__"#, bump).unwrap();
         assert_eq!(
             r,
             (
@@ -319,10 +319,10 @@ mod test {
     fn integer() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"1_234"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"1_234"#, bump).unwrap();
         assert_eq!(
             r,
-            (5, make_token(bump, 0..5, 0, 0, NodeKind::Integer(1234)))
+            (5, make_token(bump, 0..5, 0, 0, TokenKind::Integer(1234)))
         )
     }
 
@@ -330,12 +330,12 @@ mod test {
     fn integer_units() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"123_4K"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"123_4K"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 6,
-                make_token(bump, 0..6, 0, 0, NodeKind::Integer(ten_pow(1234, 1)))
+                make_token(bump, 0..6, 0, 0, TokenKind::Integer(ten_pow(1234, 1)))
             )
         )
     }
@@ -344,10 +344,10 @@ mod test {
     fn hex() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"0xAE0_1"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"0xAE0_1"#, bump).unwrap();
         assert_eq!(
             r,
-            (7, make_token(bump, 0..7, 0, 0, NodeKind::Integer(0xAE01)))
+            (7, make_token(bump, 0..7, 0, 0, TokenKind::Integer(0xAE01)))
         )
     }
 
@@ -355,12 +355,12 @@ mod test {
     fn hex_units() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"0xA_E01Ki"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"0xA_E01Ki"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 9,
-                make_token(bump, 0..9, 0, 0, NodeKind::Integer(two_pow(0xAE01, 1)))
+                make_token(bump, 0..9, 0, 0, TokenKind::Integer(two_pow(0xAE01, 1)))
             )
         )
     }
@@ -369,10 +369,10 @@ mod test {
     fn oct() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"0o77_4"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"0o77_4"#, bump).unwrap();
         assert_eq!(
             r,
-            (6, make_token(bump, 0..6, 0, 0, NodeKind::Integer(0o774)))
+            (6, make_token(bump, 0..6, 0, 0, TokenKind::Integer(0o774)))
         )
     }
 
@@ -380,12 +380,12 @@ mod test {
     fn oct_units() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"0o7_74M"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"0o7_74M"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 7,
-                make_token(bump, 0..7, 0, 0, NodeKind::Integer(ten_pow(0o774, 2)))
+                make_token(bump, 0..7, 0, 0, TokenKind::Integer(ten_pow(0o774, 2)))
             )
         )
     }
@@ -394,10 +394,13 @@ mod test {
     fn bin() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"0b00_1001"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"0b00_1001"#, bump).unwrap();
         assert_eq!(
             r,
-            (9, make_token(bump, 0..9, 0, 0, NodeKind::Integer(0b001001)))
+            (
+                9,
+                make_token(bump, 0..9, 0, 0, TokenKind::Integer(0b001001))
+            )
         )
     }
 
@@ -405,12 +408,12 @@ mod test {
     fn bin_units() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"0b001001_Mi"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"0b001001_Mi"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 11,
-                make_token(bump, 0..11, 0, 0, NodeKind::Integer(two_pow(0b001001, 2)))
+                make_token(bump, 0..11, 0, 0, TokenKind::Integer(two_pow(0b001001, 2)))
             )
         )
     }
@@ -419,10 +422,10 @@ mod test {
     fn float() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"10_0.123"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"10_0.123"#, bump).unwrap();
         assert_eq!(
             r,
-            (8, make_token(bump, 0..8, 0, 0, NodeKind::Float(100.123)))
+            (8, make_token(bump, 0..8, 0, 0, TokenKind::Float(100.123)))
         )
     }
 
@@ -430,12 +433,12 @@ mod test {
     fn float_units() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#"100._123G"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#"100._123G"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 9,
-                make_token(bump, 0..9, 0, 0, NodeKind::Integer(ten_pow(100.123, 3)))
+                make_token(bump, 0..9, 0, 0, TokenKind::Integer(ten_pow(100.123, 3)))
             )
         )
     }
@@ -444,10 +447,10 @@ mod test {
     fn small_float() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#".123_4"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#".123_4"#, bump).unwrap();
         assert_eq!(
             r,
-            (6, make_token(bump, 0..6, 0, 0, NodeKind::Float(0.1234)))
+            (6, make_token(bump, 0..6, 0, 0, TokenKind::Float(0.1234)))
         )
     }
 
@@ -455,12 +458,12 @@ mod test {
     fn small_float_units() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#".1_234Gi"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#".1_234Gi"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 8,
-                make_token(bump, 0..8, 0, 0, NodeKind::Integer(two_pow(0.1234, 3)))
+                make_token(bump, 0..8, 0, 0, TokenKind::Integer(two_pow(0.1234, 3)))
             )
         )
     }
@@ -469,10 +472,10 @@ mod test {
     fn expo_float() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#".123_4e_4"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#".123_4e_4"#, bump).unwrap();
         assert_eq!(
             r,
-            (9, make_token(bump, 0..9, 0, 0, NodeKind::Float(0.1234e4)))
+            (9, make_token(bump, 0..9, 0, 0, TokenKind::Float(0.1234e4)))
         )
     }
 
@@ -480,12 +483,12 @@ mod test {
     fn expo_float_units() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#".1_234e4_T"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#".1_234e4_T"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 10,
-                make_token(bump, 0..10, 0, 0, NodeKind::Integer(ten_pow(0.1234e4, 4)))
+                make_token(bump, 0..10, 0, 0, TokenKind::Integer(ten_pow(0.1234e4, 4)))
             )
         )
     }
@@ -494,10 +497,13 @@ mod test {
     fn pos_expo_float() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#".123_4e+_4"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#".123_4e+_4"#, bump).unwrap();
         assert_eq!(
             r,
-            (10, make_token(bump, 0..10, 0, 0, NodeKind::Float(0.1234e4)))
+            (
+                10,
+                make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e4))
+            )
         )
     }
 
@@ -505,12 +511,12 @@ mod test {
     fn pos_expo_float_units() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#".1_234e+4_Ti"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#".1_234e+4_Ti"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 12,
-                make_token(bump, 0..12, 0, 0, NodeKind::Integer(two_pow(0.1234e4, 4)))
+                make_token(bump, 0..12, 0, 0, TokenKind::Integer(two_pow(0.1234e4, 4)))
             )
         )
     }
@@ -519,12 +525,12 @@ mod test {
     fn neg_expo_float() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#".123_4e-_4"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#".123_4e-_4"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 10,
-                make_token(bump, 0..10, 0, 0, NodeKind::Float(0.1234e-4))
+                make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e-4))
             )
         )
     }
@@ -533,12 +539,12 @@ mod test {
     fn neg_expo_float_units() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#".1_234e-4_P"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#".1_234e-4_P"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 11,
-                make_token(bump, 0..11, 0, 0, NodeKind::Integer(ten_pow(0.1234e-4, 5)))
+                make_token(bump, 0..11, 0, 0, TokenKind::Integer(ten_pow(0.1234e-4, 5)))
             )
         )
     }
@@ -547,12 +553,12 @@ mod test {
     fn neg_expo_float_units_pebi() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Number>(r#".1_234e-4_Pi"#, bump).unwrap();
+        let r = test_lexer::<Number>(r#".1_234e-4_Pi"#, bump).unwrap();
         assert_eq!(
             r,
             (
                 12,
-                make_token(bump, 0..12, 0, 0, NodeKind::Integer(two_pow(0.1234e-4, 5)))
+                make_token(bump, 0..12, 0, 0, TokenKind::Integer(two_pow(0.1234e-4, 5)))
             )
         )
     }

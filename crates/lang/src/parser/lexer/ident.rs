@@ -1,4 +1,4 @@
-use super::{tables, IdentOptions, LocationRef, Node, NodeKind, NodeParser, Scanner};
+use super::{tables, IdentOptions, Lexer, LocationRef, Scanner, Token, TokenKind, TokenLexer};
 
 pub struct Ident<'src, 'bump> {
     start: LocationRef,
@@ -6,8 +6,8 @@ pub struct Ident<'src, 'bump> {
     options: IdentOptions,
 }
 
-impl<'src, 'bump> NodeParser<'src, 'bump> for Ident<'src, 'bump> {
-    fn parse(mut scanner: Scanner<'src, 'bump>) -> Option<Self> {
+impl<'src, 'bump> TokenLexer<'src, 'bump> for Ident<'src, 'bump> {
+    fn lex(_: &Lexer<'src, 'bump>, mut scanner: Scanner<'src, 'bump>) -> Option<Self> {
         let start = scanner.location();
 
         let mut options = IdentOptions::empty();
@@ -42,9 +42,9 @@ impl<'src, 'bump> NodeParser<'src, 'bump> for Ident<'src, 'bump> {
         false
     }
 
-    fn accept(self, parent: &mut Scanner<'src, 'bump>) -> Result<Node<'bump>, Node<'bump>> {
-        let result = NodeKind::Ident(self.scanner.alloc_str_here(self.start), self.options);
-        Ok(parent.node(self.scanner, self.start, result))
+    fn accept(self, parent: &mut Lexer<'src, 'bump>) -> Result<Token<'bump>, Token<'bump>> {
+        let result = TokenKind::Ident(self.scanner.alloc_str_here(self.start), self.options);
+        Ok(parent.token(self.scanner, self.start, result))
     }
 }
 
@@ -52,9 +52,9 @@ impl<'src, 'bump> NodeParser<'src, 'bump> for Ident<'src, 'bump> {
 mod test {
     use bumpalo::Bump;
 
-    use crate::parser::{
-        test::{make_token, test_parser},
-        IdentOptions, NodeKind,
+    use crate::parser::lexer::{
+        test::{make_token, test_lexer},
+        IdentOptions, TokenKind,
     };
 
     use pretty_assertions::assert_eq;
@@ -64,7 +64,7 @@ mod test {
     #[test]
     fn no_ident() {
         let bump = Bump::new();
-        let r = test_parser::<Ident>(r#"123"#, &bump);
+        let r = test_lexer::<Ident>(r#"123"#, &bump);
         assert_eq!(r, None);
     }
 
@@ -72,7 +72,7 @@ mod test {
     fn simple_ident() {
         let bump = Bump::new();
         let bump = &bump;
-        let r = test_parser::<Ident>(r#"foo"#, bump).unwrap();
+        let r = test_lexer::<Ident>(r#"foo"#, bump).unwrap();
         assert_eq!(
             r,
             (
@@ -82,7 +82,7 @@ mod test {
                     0..3,
                     0,
                     0,
-                    NodeKind::Ident(bump.alloc_str("foo"), IdentOptions::empty())
+                    TokenKind::Ident(bump.alloc_str("foo"), IdentOptions::empty())
                 )
             )
         )
