@@ -95,7 +95,7 @@ struct Inner<'src, 'bump> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InterpolationUnit {
     Char,
-    String,
+    Byte,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,11 +105,15 @@ enum InterpolationExtent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
+enum Scope<'src> {
     Paren,
     Brace,
     Bracket,
-    Interpolation(InterpolationUnit, InterpolationExtent),
+    Interpolation {
+        unit: InterpolationUnit,
+        extent: InterpolationExtent,
+        hashes: &'src str,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -231,7 +235,7 @@ impl<'src, 'bump> Scanner<'src, 'bump> {
 
     #[inline(always)]
     fn match_start(&mut self, value: &str) -> bool {
-        if value.len() == 0 {
+        if value.is_empty() {
             return true;
         }
 
@@ -255,8 +259,13 @@ impl<'src, 'bump> Scanner<'src, 'bump> {
     }
 
     #[inline(always)]
+    fn bump(&self) -> &'bump Bump {
+        self.inner.bump
+    }
+
+    #[inline(always)]
     fn alloc_str_here(&self, loc: LocationRef) -> &'bump str {
-        self.inner.bump.alloc_str(self.get_str(loc))
+        self.bump().alloc_str(self.get_str(loc))
     }
 }
 
@@ -270,7 +279,7 @@ trait TokenLexer<'src, 'bump>: Sized {
 struct Lexer<'src, 'bump> {
     inner: Inner<'src, 'bump>,
     scanner: Scanner<'src, 'bump>,
-    scopes: Vec<Scope>,
+    scopes: Vec<Scope<'src>>,
 }
 
 impl<'src, 'bump> Lexer<'src, 'bump> {
@@ -288,22 +297,22 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
                 col: 0,
                 offset: 0,
             },
-            scopes: RefCell::new(Vec::new()),
+            scopes: Vec::new(),
         }
     }
 
     #[inline(always)]
-    fn push_scope(&mut self, scope: Scope) {
+    fn push_scope(&mut self, scope: Scope<'src>) {
         self.scopes.push(scope)
     }
 
     #[inline(always)]
-    fn peek_scope(&self) -> Option<Scope> {
+    fn peek_scope(&self) -> Option<Scope<'src>> {
         self.scopes.last().copied()
     }
 
     #[inline(always)]
-    fn pop_scope(&mut self) -> Option<Scope> {
+    fn pop_scope(&mut self) -> Option<Scope<'src>> {
         self.scopes.pop()
     }
 

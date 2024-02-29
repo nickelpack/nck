@@ -1,9 +1,18 @@
-use super::{ErrorKind, Lexer, LocationRef, Scanner, Scope, TokenLexer};
+use super::{
+    ErrorKind, InterpolationExtent, InterpolationUnit, Lexer, LocationRef, Scanner, Scope,
+    TokenLexer,
+};
+
+const DELIM_MULTI_CHAR: &str = r#"""""#;
+const DELIM_MULTI_BYTE: &str = "'''";
+const DELIM_LINE_CHAR: &str = r#"""#;
+const DELIM_LINE_BYTE: &str = "'";
 
 struct Str<'src, 'bump> {
     start: LocationRef,
     scanner: Scanner<'src, 'bump>,
     result: Result<String, ErrorKind>,
+    next: Option<Scope<'src>>,
 }
 
 impl<'src, 'bump> TokenLexer<'src, 'bump> for Str<'src, 'bump> {
@@ -11,11 +20,49 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Str<'src, 'bump> {
         let start = scanner.location();
         let hashes = scanner.advance_while(|c| c == '#', None).unwrap_or("");
         match (hashes, scanner.nth_char(0), lexer.peek_scope()) {
-            ("", Some(')'), Some(Scope::Interpolation(unit, extent))) => todo!(),
-            (hashes, Some('"'), _) if scanner.match_start(r#"""""#) => todo!(),
-            (hashes, Some('"'), _) if scanner.match_start("\"") => todo!(),
-            (hashes, Some('\''), _) if scanner.match_start("'''") => todo!(),
-            (hashes, Some('\''), _) if scanner.match_start("'") => todo!(),
+            (
+                "",
+                Some(')'),
+                Some(Scope::Interpolation {
+                    unit,
+                    extent,
+                    hashes,
+                }),
+            ) if scanner.match_start(")") => {
+                Self::lex_common(lexer, scanner, start, hashes, extent, unit)
+            }
+            (hashes, Some('"'), _) if scanner.match_start(DELIM_MULTI_CHAR) => Self::lex_common(
+                lexer,
+                scanner,
+                start,
+                hashes,
+                InterpolationExtent::Multi,
+                InterpolationUnit::Char,
+            ),
+            (hashes, Some('"'), _) if scanner.match_start(DELIM_LINE_CHAR) => Self::lex_common(
+                lexer,
+                scanner,
+                start,
+                hashes,
+                InterpolationExtent::Line,
+                InterpolationUnit::Char,
+            ),
+            (hashes, Some('\''), _) if scanner.match_start(DELIM_MULTI_BYTE) => Self::lex_common(
+                lexer,
+                scanner,
+                start,
+                hashes,
+                InterpolationExtent::Multi,
+                InterpolationUnit::Byte,
+            ),
+            (hashes, Some('\''), _) if scanner.match_start(DELIM_LINE_BYTE) => Self::lex_common(
+                lexer,
+                scanner,
+                start,
+                hashes,
+                InterpolationExtent::Line,
+                InterpolationUnit::Byte,
+            ),
             _ => None,
         }
     }
@@ -28,174 +75,147 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Str<'src, 'bump> {
         self,
         lexer: &mut super::Lexer<'src, 'bump>,
     ) -> Result<super::Token<'bump>, super::Token<'bump>> {
-        todo!()
+        match self.result {
+            Ok(s) => {
+                let st = self.scanner.bump().alloc_str(&s);
+                Ok(lexer.token(self.scanner, self.start, super::TokenKind::String(st)))
+            }
+            Err(_) => todo!(),
+        }
     }
 }
 
-#[cfg(never)]
-mod never {
-    impl<'src, 'bump> LexerFrame<'src, 'bump> {
-        pub(super) fn take_string_or_ident(&mut self) {
-            let start = self.loc;
-            let mut count = 0;
-            while self.match_start("#") {
-                count += 1;
-            }
+impl<'src, 'bump> Str<'src, 'bump> {
+    fn lex_common(
+        lexer: &Lexer<'src, 'bump>,
+        mut scanner: Scanner<'src, 'bump>,
+        location: LocationRef,
+        hashes: &'src str,
+        extent: InterpolationExtent,
+        unit: InterpolationUnit,
+    ) -> Option<Self> {
+        let delim = match (extent, unit) {
+            (InterpolationExtent::Line, InterpolationUnit::Char) => DELIM_LINE_CHAR,
+            (InterpolationExtent::Line, InterpolationUnit::Byte) => DELIM_LINE_BYTE,
+            (InterpolationExtent::Multi, InterpolationUnit::Char) => DELIM_MULTI_CHAR,
+            (InterpolationExtent::Multi, InterpolationUnit::Byte) => DELIM_MULTI_BYTE,
+        };
+        let quote = delim.chars().next().unwrap();
 
-            let c = if let Some(c) = self.nth_char(0) {
-                c
-            } else {
-                self.error_at_offset(start, super::ErrorKind::UnterminatedString);
-                return;
-            };
+        let allow_newline = extent == InterpolationExtent::Multi;
+        let mut tmp = String::new();
 
-            if self.match_start("\"\"\"") {
-                self.take_string(count, "\"\"\"", MultiLineType::<str>::new(), StringCharType);
-            } else if self.match_start("'''") {
-                self.take_string(count, "'''", MultiLineType::<[u8]>::new(), BytesCharType);
-            } else if self.match_start("\"") {
-                self.take_string(count, "\"", SingleLineType::<str>::None, StringCharType);
-            } else if self.match_start("'") {
-                self.take_string(count, "'", SingleLineType::<[u8]>::None, BytesCharType);
-            } else if tables::derived_property::XID_Start(c) && count < 2 {
-                let options = if count == 0 {
-                    IdentOptions::empty()
-                } else {
-                    IdentOptions::DECL
-                };
-                self.take_ident(options);
-            } else {
-                self.error_at_offset(start, ErrorKind::UnterminatedString);
-            }
-        }
-
-        fn take_string(
-            &mut self,
-            pound_count: usize,
-            terminator: &str,
-            line: impl LineType<'src, 'bump>,
-            ch: impl CharType<'src, 'bump>,
-        ) {
-            let mut start = self.loc;
-            let quote = terminator.chars().next().unwrap();
-            while let Some(c) = self.nth_char(0) {
+        let mut start = location;
+        while let Some(c) = scanner.nth_char(0) {
+            while let Some(c) = scanner.nth_char(0) {
                 match c {
-                    '\\' => {
-                        if self
-                            .remainder()
-                            .chars()
-                            .skip(1)
-                            .take(pound_count)
-                            .filter(|c| *c == '#')
-                            .count()
-                            == pound_count
-                        {
-                            self.advance_by(1 + pound_count);
-                            self.take_string_escape(&mut start, quote);
-                        }
-
-                        self.take_string_escape(&mut start, quote);
+                    '\\' if scanner.match_start(hashes) => {
+                        Self::take_string_escape(&mut scanner, &mut start, &mut tmp, quote);
                     }
-                    _ if self.match_start(terminator) => {
-                        self.string_token(start);
-                        return;
+                    '\\' if hashes.is_empty() => {
+                        todo!();
+                    }
+                    _ if scanner.match_start(delim) => {
+                        return Some(Str {
+                            start,
+                            scanner,
+                            result: Ok(tmp),
+                            next: None,
+                        })
                     }
                     c => {
-                        self.string.push(c);
-                        self.advance_by(1);
+                        tmp.push(c);
+                        scanner.advance_by_chars(1);
                     }
                 }
             }
-            self.error_at_offset(start, ErrorKind::UnterminatedString);
         }
+        None
+    }
 
-        fn take_string_escape(&mut self, start: &mut LocationRef, quote: char) {
-            let c = if let Some(c) = self.nth_char(0) {
-                c
-            } else {
-                self.error_at_offset(*start, ErrorKind::BadEscapeSequence);
-                return;
-            };
+    fn take_string_escape(
+        scanner: &mut Scanner<'src, 'bump>,
+        start: &mut LocationRef,
+        tmp: &mut String,
+        quote: char,
+    ) {
+        let c = if let Some(c) = scanner.nth_char(0) {
+            c
+        } else {
+            // self.error_at_offset(*start, ErrorKind::BadEscapeSequence);
+            return;
+        };
 
-            match c {
-                'a' => {
-                    self.advance_by(1);
-                    self.string.push('\x07');
-                }
-                'b' => {
-                    self.advance_by(1);
-                    self.string.push('\x08');
-                }
-                'f' => {
-                    self.advance_by(1);
-                    self.string.push('\x0C');
-                }
-                'n' => {
-                    self.advance_by(1);
-                    self.string.push('\n');
-                }
-                'r' => {
-                    self.advance_by(1);
-                    self.string.push('\r');
-                }
-                't' => {
-                    self.advance_by(1);
-                    self.string.push('\t');
-                }
-                'v' => {
-                    self.advance_by(1);
-                    self.string.push('\x0B');
-                }
-                '/' => {
-                    self.advance_by(1);
-                    self.string.push('/');
-                }
-                '\\' => {
-                    self.advance_by(1);
-                    self.string.push('\\');
-                }
-                quote => {
-                    self.advance_by(1);
-                    self.string.push(quote);
-                }
-                'u' | 'U' => {
-                    let escape = self.loc;
-                    self.advance_by(1);
-                    let len = (c == 'u').then_some(4).unwrap_or(8);
-                    if let Some((_, val)) = self.advance_by(len) {
-                        self.parse_unicode(escape, val)
-                    } else {
-                        self.error_at_offset(*start, ErrorKind::BadEscapeSequence)
-                    }
-                }
-                'U' => {
-                    let escape = self.loc;
-                    self.advance_by(1);
-                    if let Some((_, val)) = self.advance_by(8) {
-                        self.parse_unicode(escape, val)
-                    } else {
-                        self.error_at_offset(*start, ErrorKind::BadEscapeSequence)
-                    }
-                }
-                '(' => {
-                    self.string_token(*start);
-                    self.match_start("(");
-                    self.take_whitespace();
-                    while !self.match_start(")") {
-                        self.root();
-                    }
-                    *start = self.loc;
-                }
-                _ => self.error_at_offset(self.loc, ErrorKind::BadEscapeSequence),
+        match c {
+            'a' if scanner.match_start("a") => tmp.push('\x07'),
+            'b' if scanner.match_start("b") => tmp.push('\x08'),
+            'f' if scanner.match_start("f") => tmp.push('\x0C'),
+            'n' if scanner.match_start("n") => tmp.push('\n'),
+            'r' if scanner.match_start("r") => tmp.push('\r'),
+            't' if scanner.match_start("t'") => tmp.push('\t'),
+            'v' if scanner.match_start("v") => tmp.push('\x0B'),
+            '/' if scanner.match_start("/") => tmp.push('/'),
+            '\\' if scanner.match_start("\\") => tmp.push('\\'),
+            quote => {
+                scanner.advance_by_chars(1);
+                tmp.push(quote);
             }
-        }
-
-        fn parse_unicode(&mut self, start: LocationRef, val: &'src str) {
-            if let Some(val) = u32::from_str_radix(val, 16).ok().and_then(char::from_u32) {
-                self.string.push(val);
-            } else {
-                self.error_at_offset(start, ErrorKind::BadEscapeSequence);
+            'u' | 'U' => {
+                let escape = scanner.location();
+                scanner.advance_by_chars(1);
+                let len = if (c == 'u') { 4 } else { 8 };
+                if let Some(val) = scanner.advance_by_chars(len) {
+                    Self::parse_unicode(tmp, escape, val)
+                } else {
+                    todo!()
+                }
             }
+            '(' => {
+                todo!();
+            }
+            _ => todo!(),
         }
+    }
+
+    fn parse_unicode(tmp: &mut String, start: LocationRef, val: &'src str) {
+        if let Some(val) = u32::from_str_radix(val, 16).ok().and_then(char::from_u32) {
+            tmp.push(val);
+        } else {
+            todo!();
+        }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use bumpalo::Bump;
+
+    use crate::parser::lexer::{
+        test::{make_token, test_lexer},
+        IdentOptions, TokenKind,
+    };
+
+    use super::Str;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn no_str() {
+        let bump = Bump::new();
+        let r = test_lexer::<Str>(r#"123"#, &bump);
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn simple_ident() {
+        let bump = Bump::new();
+        let bump = &bump;
+        let r = test_lexer::<Str>(r#""foo""#, bump).unwrap();
+        assert_eq!(
+            r,
+            (
+                5,
+                make_token(bump, 0..5, 0, 0, TokenKind::String(bump.alloc_str("foo")))
+            )
+        )
     }
 }

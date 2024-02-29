@@ -8,10 +8,8 @@ use std::{path::PathBuf, sync::Arc};
 use bumpalo::collections::Vec;
 use bumpalo::Bump;
 
-mod ident;
+mod lexer;
 mod location;
-mod number;
-mod tables;
 
 pub use location::Location;
 
