@@ -42,9 +42,9 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Ident<'src, 'bump> {
         false
     }
 
-    fn accept(self, parent: &mut Lexer<'src, 'bump>) -> Result<Token<'bump>, Token<'bump>> {
+    fn accept(self, parent: &mut Lexer<'src, 'bump>) {
         let result = TokenKind::Ident(self.scanner.alloc_str_here(self.start), self.options);
-        Ok(parent.token(self.scanner, self.start, result))
+        parent.token(self.scanner, [(self.start, result)].into_iter());
     }
 }
 
@@ -77,13 +77,13 @@ mod test {
             r,
             (
                 3,
-                make_token(
+                vec![make_token(
                     bump,
                     0..3,
                     0,
                     0,
                     TokenKind::Ident(bump.alloc_str("foo"), IdentOptions::empty())
-                )
+                )]
             )
         )
     }

@@ -71,14 +71,14 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Str<'src, 'bump> {
         self.result.is_err()
     }
 
-    fn accept(
-        self,
-        lexer: &mut super::Lexer<'src, 'bump>,
-    ) -> Result<super::Token<'bump>, super::Token<'bump>> {
+    fn accept(self, lexer: &mut super::Lexer<'src, 'bump>) {
         match self.result {
             Ok(s) => {
                 let st = self.scanner.bump().alloc_str(&s);
-                Ok(lexer.token(self.scanner, self.start, super::TokenKind::String(st)))
+                lexer.token(
+                    self.scanner,
+                    [(self.start, super::TokenKind::String(st))].into_iter(),
+                )
             }
             Err(_) => todo!(),
         }
@@ -214,7 +214,13 @@ mod test {
             r,
             (
                 5,
-                make_token(bump, 0..5, 0, 0, TokenKind::String(bump.alloc_str("foo")))
+                vec![make_token(
+                    bump,
+                    0..5,
+                    0,
+                    0,
+                    TokenKind::String(bump.alloc_str("foo"))
+                )]
             )
         )
     }

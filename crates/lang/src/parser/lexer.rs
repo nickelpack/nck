@@ -272,7 +272,7 @@ impl<'src, 'bump> Scanner<'src, 'bump> {
 trait TokenLexer<'src, 'bump>: Sized {
     fn lex(lexer: &Lexer<'src, 'bump>, scanner: Scanner<'src, 'bump>) -> Option<Self>;
     fn is_error(&self) -> bool;
-    fn accept(self, lexer: &mut Lexer<'src, 'bump>) -> Result<Token<'bump>, Token<'bump>>;
+    fn accept(self, lexer: &mut Lexer<'src, 'bump>);
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +280,7 @@ struct Lexer<'src, 'bump> {
     inner: Inner<'src, 'bump>,
     scanner: Scanner<'src, 'bump>,
     scopes: Vec<Scope<'src>>,
+    tokens: Vec<Token<'bump>>,
 }
 
 impl<'src, 'bump> Lexer<'src, 'bump> {
@@ -298,6 +299,7 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
                 offset: 0,
             },
             scopes: Vec::new(),
+            tokens: Vec::new(),
         }
     }
 
@@ -319,22 +321,23 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
     fn token(
         &mut self,
         consume: Scanner<'src, 'bump>,
-        loc: LocationRef,
-        kind: TokenKind<'bump>,
-    ) -> Token<'bump> {
-        let end = loc.end.unwrap_or(consume.offset);
+        tokens: impl Iterator<Item = (LocationRef, TokenKind<'bump>)>,
+    ) {
         self.scanner.line = consume.line;
         self.scanner.col = consume.col;
         self.scanner.offset = consume.offset;
-        Token {
-            kind,
-            location: Location::new_in(
-                loc.offset..end,
-                loc.line,
-                loc.col,
-                consume.inner.path,
-                consume.inner.bump,
-            ),
+        for (loc, kind) in tokens {
+            let end = loc.end.unwrap_or(consume.offset);
+            self.tokens.push(Token {
+                kind,
+                location: Location::new_in(
+                    loc.offset..end,
+                    loc.line,
+                    loc.col,
+                    consume.inner.path,
+                    consume.inner.bump,
+                ),
+            })
         }
     }
 
@@ -364,13 +367,11 @@ mod test {
     pub fn test_lexer<'src, 'bump, L: TokenLexer<'src, 'bump>>(
         src: &'src str,
         bump: &'bump Bump,
-    ) -> Option<(usize, Result<Token<'bump>, Token<'bump>>)> {
+    ) -> Option<(usize, Vec<Token<'bump>>)> {
         let mut lexer = Lexer::new(src, test_path(), bump);
         lexer.lex::<L>().map(move |r| {
-            let e = r.is_error();
-            let r = r.accept(&mut lexer);
-            assert_eq!(e, r.is_err());
-            (lexer.scanner.offset, r)
+            r.accept(&mut lexer);
+            (lexer.scanner.offset, lexer.tokens)
         })
     }
 
@@ -380,11 +381,11 @@ mod test {
         line: usize,
         col: usize,
         kind: TokenKind<'bump>,
-    ) -> Result<Token<'bump>, Token<'bump>> {
-        Ok(Token {
+    ) -> Token<'bump> {
+        Token {
             kind,
             location: Location::new_in(range, line, col, test_path(), bump),
-        })
+        }
     }
 
     pub fn make_error(
@@ -393,10 +394,10 @@ mod test {
         line: usize,
         col: usize,
         kind: ErrorKind,
-    ) -> Result<Token<'_>, Token<'_>> {
-        Err(Token {
+    ) -> Token<'_> {
+        Token {
             kind: TokenKind::Error(kind),
             location: Location::new_in(range, line, col, test_path(), bump),
-        })
+        }
     }
 }

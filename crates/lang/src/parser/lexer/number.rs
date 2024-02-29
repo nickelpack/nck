@@ -44,19 +44,24 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Number<'src, 'bump> {
         matches!(self.value, NumberValue::Err)
     }
 
-    fn accept(self, next_location: &mut Lexer<'src, 'bump>) -> Result<Token<'bump>, Token<'bump>> {
+    fn accept(self, next_location: &mut Lexer<'src, 'bump>) {
         match self.value {
-            NumberValue::Integer(i) => {
-                Ok(next_location.token(self.scanner, self.start, TokenKind::Integer(i)))
-            }
-            NumberValue::Float(f) => {
-                Ok(next_location.token(self.scanner, self.start, TokenKind::Float(f)))
-            }
-            NumberValue::Err => Err(next_location.token(
+            NumberValue::Integer(i) => next_location.token(
                 self.scanner,
-                self.start,
-                TokenKind::Error(ErrorKind::InvalidNumberLiteral),
-            )),
+                [(self.start, TokenKind::Integer(i))].into_iter(),
+            ),
+            NumberValue::Float(f) => next_location.token(
+                self.scanner,
+                [(self.start, TokenKind::Float(f))].into_iter(),
+            ),
+            NumberValue::Err => next_location.token(
+                self.scanner,
+                [(
+                    self.start,
+                    TokenKind::Error(ErrorKind::InvalidNumberLiteral),
+                )]
+                .into_iter(),
+            ),
         }
     }
 }
@@ -254,7 +259,13 @@ mod test {
             r,
             (
                 2,
-                make_error(bump, 0..2, 0, 0, ErrorKind::InvalidNumberLiteral)
+                vec![make_error(
+                    bump,
+                    0..2,
+                    0,
+                    0,
+                    ErrorKind::InvalidNumberLiteral
+                )]
             )
         );
     }
@@ -268,7 +279,13 @@ mod test {
             r,
             (
                 2,
-                make_error(bump, 0..2, 0, 0, ErrorKind::InvalidNumberLiteral)
+                vec![make_error(
+                    bump,
+                    0..2,
+                    0,
+                    0,
+                    ErrorKind::InvalidNumberLiteral
+                )]
             )
         );
     }
@@ -282,7 +299,13 @@ mod test {
             r,
             (
                 2,
-                make_error(bump, 0..2, 0, 0, ErrorKind::InvalidNumberLiteral)
+                vec![make_error(
+                    bump,
+                    0..2,
+                    0,
+                    0,
+                    ErrorKind::InvalidNumberLiteral
+                )]
             )
         );
     }
@@ -296,7 +319,13 @@ mod test {
             r,
             (
                 3,
-                make_error(bump, 0..3, 0, 0, ErrorKind::InvalidNumberLiteral)
+                vec![make_error(
+                    bump,
+                    0..3,
+                    0,
+                    0,
+                    ErrorKind::InvalidNumberLiteral
+                )]
             )
         );
     }
@@ -310,7 +339,13 @@ mod test {
             r,
             (
                 5,
-                make_error(bump, 0..5, 0, 0, ErrorKind::InvalidNumberLiteral)
+                vec![make_error(
+                    bump,
+                    0..5,
+                    0,
+                    0,
+                    ErrorKind::InvalidNumberLiteral
+                )]
             )
         );
     }
@@ -322,7 +357,10 @@ mod test {
         let r = test_lexer::<Number>(r#"1_234"#, bump).unwrap();
         assert_eq!(
             r,
-            (5, make_token(bump, 0..5, 0, 0, TokenKind::Integer(1234)))
+            (
+                5,
+                vec![make_token(bump, 0..5, 0, 0, TokenKind::Integer(1234))]
+            )
         )
     }
 
@@ -335,7 +373,13 @@ mod test {
             r,
             (
                 6,
-                make_token(bump, 0..6, 0, 0, TokenKind::Integer(ten_pow(1234, 1)))
+                vec![make_token(
+                    bump,
+                    0..6,
+                    0,
+                    0,
+                    TokenKind::Integer(ten_pow(1234, 1))
+                )]
             )
         )
     }
@@ -347,7 +391,10 @@ mod test {
         let r = test_lexer::<Number>(r#"0xAE0_1"#, bump).unwrap();
         assert_eq!(
             r,
-            (7, make_token(bump, 0..7, 0, 0, TokenKind::Integer(0xAE01)))
+            (
+                7,
+                vec![make_token(bump, 0..7, 0, 0, TokenKind::Integer(0xAE01))]
+            )
         )
     }
 
@@ -360,7 +407,13 @@ mod test {
             r,
             (
                 9,
-                make_token(bump, 0..9, 0, 0, TokenKind::Integer(two_pow(0xAE01, 1)))
+                vec![make_token(
+                    bump,
+                    0..9,
+                    0,
+                    0,
+                    TokenKind::Integer(two_pow(0xAE01, 1))
+                )]
             )
         )
     }
@@ -372,7 +425,10 @@ mod test {
         let r = test_lexer::<Number>(r#"0o77_4"#, bump).unwrap();
         assert_eq!(
             r,
-            (6, make_token(bump, 0..6, 0, 0, TokenKind::Integer(0o774)))
+            (
+                6,
+                vec![make_token(bump, 0..6, 0, 0, TokenKind::Integer(0o774))]
+            )
         )
     }
 
@@ -385,7 +441,13 @@ mod test {
             r,
             (
                 7,
-                make_token(bump, 0..7, 0, 0, TokenKind::Integer(ten_pow(0o774, 2)))
+                vec![make_token(
+                    bump,
+                    0..7,
+                    0,
+                    0,
+                    TokenKind::Integer(ten_pow(0o774, 2))
+                )]
             )
         )
     }
@@ -399,7 +461,7 @@ mod test {
             r,
             (
                 9,
-                make_token(bump, 0..9, 0, 0, TokenKind::Integer(0b001001))
+                vec![make_token(bump, 0..9, 0, 0, TokenKind::Integer(0b001001))]
             )
         )
     }
@@ -413,7 +475,13 @@ mod test {
             r,
             (
                 11,
-                make_token(bump, 0..11, 0, 0, TokenKind::Integer(two_pow(0b001001, 2)))
+                vec![make_token(
+                    bump,
+                    0..11,
+                    0,
+                    0,
+                    TokenKind::Integer(two_pow(0b001001, 2))
+                )]
             )
         )
     }
@@ -425,7 +493,10 @@ mod test {
         let r = test_lexer::<Number>(r#"10_0.123"#, bump).unwrap();
         assert_eq!(
             r,
-            (8, make_token(bump, 0..8, 0, 0, TokenKind::Float(100.123)))
+            (
+                8,
+                vec![make_token(bump, 0..8, 0, 0, TokenKind::Float(100.123))]
+            )
         )
     }
 
@@ -438,7 +509,13 @@ mod test {
             r,
             (
                 9,
-                make_token(bump, 0..9, 0, 0, TokenKind::Integer(ten_pow(100.123, 3)))
+                vec![make_token(
+                    bump,
+                    0..9,
+                    0,
+                    0,
+                    TokenKind::Integer(ten_pow(100.123, 3))
+                )]
             )
         )
     }
@@ -450,7 +527,10 @@ mod test {
         let r = test_lexer::<Number>(r#".123_4"#, bump).unwrap();
         assert_eq!(
             r,
-            (6, make_token(bump, 0..6, 0, 0, TokenKind::Float(0.1234)))
+            (
+                6,
+                vec![make_token(bump, 0..6, 0, 0, TokenKind::Float(0.1234))]
+            )
         )
     }
 
@@ -463,7 +543,13 @@ mod test {
             r,
             (
                 8,
-                make_token(bump, 0..8, 0, 0, TokenKind::Integer(two_pow(0.1234, 3)))
+                vec![make_token(
+                    bump,
+                    0..8,
+                    0,
+                    0,
+                    TokenKind::Integer(two_pow(0.1234, 3))
+                )]
             )
         )
     }
@@ -475,7 +561,10 @@ mod test {
         let r = test_lexer::<Number>(r#".123_4e_4"#, bump).unwrap();
         assert_eq!(
             r,
-            (9, make_token(bump, 0..9, 0, 0, TokenKind::Float(0.1234e4)))
+            (
+                9,
+                vec![make_token(bump, 0..9, 0, 0, TokenKind::Float(0.1234e4))]
+            )
         )
     }
 
@@ -488,7 +577,13 @@ mod test {
             r,
             (
                 10,
-                make_token(bump, 0..10, 0, 0, TokenKind::Integer(ten_pow(0.1234e4, 4)))
+                vec![make_token(
+                    bump,
+                    0..10,
+                    0,
+                    0,
+                    TokenKind::Integer(ten_pow(0.1234e4, 4))
+                )]
             )
         )
     }
@@ -502,7 +597,7 @@ mod test {
             r,
             (
                 10,
-                make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e4))
+                vec![make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e4))]
             )
         )
     }
@@ -516,7 +611,13 @@ mod test {
             r,
             (
                 12,
-                make_token(bump, 0..12, 0, 0, TokenKind::Integer(two_pow(0.1234e4, 4)))
+                vec![make_token(
+                    bump,
+                    0..12,
+                    0,
+                    0,
+                    TokenKind::Integer(two_pow(0.1234e4, 4))
+                )]
             )
         )
     }
@@ -530,7 +631,7 @@ mod test {
             r,
             (
                 10,
-                make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e-4))
+                vec![make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e-4))]
             )
         )
     }
@@ -544,7 +645,13 @@ mod test {
             r,
             (
                 11,
-                make_token(bump, 0..11, 0, 0, TokenKind::Integer(ten_pow(0.1234e-4, 5)))
+                vec![make_token(
+                    bump,
+                    0..11,
+                    0,
+                    0,
+                    TokenKind::Integer(ten_pow(0.1234e-4, 5))
+                )]
             )
         )
     }
@@ -558,7 +665,13 @@ mod test {
             r,
             (
                 12,
-                make_token(bump, 0..12, 0, 0, TokenKind::Integer(two_pow(0.1234e-4, 5)))
+                vec![make_token(
+                    bump,
+                    0..12,
+                    0,
+                    0,
+                    TokenKind::Integer(two_pow(0.1234e-4, 5))
+                )]
             )
         )
     }
