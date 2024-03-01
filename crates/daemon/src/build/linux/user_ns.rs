@@ -1,3 +1,5 @@
+#![tarpaulin::skip]
+
 use nck_io::PrintableBuffer;
 use nix::unistd::Pid;
 use serde::{Deserialize, Serialize};

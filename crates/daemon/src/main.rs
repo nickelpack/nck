@@ -1,6 +1,9 @@
 #![feature(never_type)]
 #![feature(lazy_cell)]
 #![feature(unix_socket_ancillary_data)]
+#![feature(register_tool)]
+#![feature(custom_inner_attributes)]
+#![register_tool(tarpaulin)]
 
 use build::linux::PendingController;
 use settings::Settings;

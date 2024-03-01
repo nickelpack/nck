@@ -1,3 +1,5 @@
+#![tarpaulin::skip]
+
 use std::{
     ffi::{OsStr, OsString},
     os::fd::{AsRawFd, FromRawFd, OwnedFd},

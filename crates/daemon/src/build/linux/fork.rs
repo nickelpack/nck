@@ -1,3 +1,5 @@
+#![tarpaulin::skip]
+
 // https://github.com/containers/youki/blob/main/crates/libcontainer/src/process/fork.rs
 
 use std::{ffi::c_int, fs::File, num::NonZeroUsize};
@@ -280,12 +282,15 @@ fn clone_fallback<R: IntoExitCode + std::fmt::Debug>(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(tarpaulin)))]
 mod test {
     use super::*;
     use crate::build::linux::channel::unix_pair;
     use anyhow::{bail, Context, Result};
-    use nix::sys::wait::{waitpid, WaitStatus};
+    use nix::{
+        sys::wait::{waitpid, WaitStatus},
+        unistd::ForkResult,
+    };
 
     #[test]
     fn test_clone() -> Result<()> {
@@ -328,8 +333,8 @@ mod test {
         // of the sibling process to the testing process.
         let (child_channel, server_channel) = &mut unix_pair::<i32, i32>()?;
 
-        match super::fork()? {
-            Some(child) => {
+        match unsafe { nix::unistd::fork() }? {
+            ForkResult::Parent { child } => {
                 let channel = server_channel
                     .clone()
                     .into_peer()
@@ -355,7 +360,7 @@ mod test {
                     _ => bail!("failed to wait on the forked process"),
                 }
             }
-            None => {
+            ForkResult::Child => {
                 // Inside the forked process. We call `container_clone` and pass
                 // the pid to the parent process.
                 let channel = child_channel.clone().into_peer()?;

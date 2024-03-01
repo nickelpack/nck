@@ -1,3 +1,5 @@
+#![tarpaulin::skip]
+
 use std::{
     cell::RefCell,
     ops::Add,

@@ -83,7 +83,7 @@ impl Drop for FdQueue {
 }
 
 thread_local! {
-    static CHANNEL_FDS: RefCell<Option<FdQueue>> = RefCell::new(None);
+    static CHANNEL_FDS: RefCell<Option<FdQueue>> = const { RefCell::new(None) };
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -617,6 +617,8 @@ pub fn unix_pair<A, B>() -> std::io::Result<(PendingChannel<A, B>, PendingChanne
 mod test {
     use std::time::Duration;
 
+    use crate::build::linux::fork::{CloneError, IntoExitCode};
+
     use super::{unix_pair, PendingChannel};
     use nix::sched::CloneFlags;
     use rstest::rstest;
@@ -633,12 +635,27 @@ mod test {
         }
     }
 
+    // Tarpaulin does not like child processes, at least in the way we're doing them.
+    pub fn clone_impl<R: IntoExitCode + std::fmt::Debug + 'static>(
+        mut cb: Box<dyn Send + FnMut() -> R>,
+        clone_flags: CloneFlags,
+    ) -> Result<(), CloneError> {
+        if cfg!(tarpaulin) {
+            std::thread::spawn(move || {
+                cb();
+            });
+        } else {
+            super::super::fork::clone(cb, clone_flags)?;
+        }
+        Ok(())
+    }
+
     #[rstest]
     #[timeout(Duration::from_secs(2))]
     fn serialize() -> anyhow::Result<()> {
         let (child_channel, server_channel) = unix_pair::<i32, BigThing>()?;
 
-        super::super::fork::clone(
+        clone_impl(
             Box::new(move || -> anyhow::Result<()> {
                 let channel = child_channel.clone().into_peer().unwrap();
                 let received_channel = channel.recv().unwrap();
@@ -663,7 +680,7 @@ mod test {
     fn serialize_async_child() -> anyhow::Result<()> {
         let (child_channel, server_channel) = unix_pair::<i32, BigThing>()?;
 
-        super::super::fork::clone(
+        clone_impl(
             Box::new(move || -> anyhow::Result<()> {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -694,7 +711,7 @@ mod test {
     fn serialize_async_parent() -> anyhow::Result<()> {
         let (child_channel, server_channel) = unix_pair::<i32, BigThing>()?;
 
-        super::super::fork::clone(
+        clone_impl(
             Box::new(move || -> anyhow::Result<()> {
                 let channel = child_channel.clone().into_peer().unwrap();
                 let received_channel = channel.recv().unwrap();
@@ -727,7 +744,7 @@ mod test {
     fn serialize_async_both() -> anyhow::Result<()> {
         let (child_channel, server_channel) = unix_pair::<i32, BigThing>()?;
 
-        super::super::fork::clone(
+        clone_impl(
             Box::new(move || -> anyhow::Result<()> {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()

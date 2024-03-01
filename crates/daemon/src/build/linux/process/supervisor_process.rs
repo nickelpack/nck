@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs::File, path::PathBuf};
 
 use anyhow::Context;
 use nck_io::fs::TempDir;
@@ -90,8 +90,20 @@ fn fallible_supervisor_process(
         SYS_NONE,
     )?;
 
-    let tmp = Unmount(tmp);
+    let f = std::fs::OpenOptions::new()
+        .read(false)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(tmp.as_path().join(".keep"))?;
 
+    // File will keep mount alive
+    unmount(
+        tmp.as_path(),
+        MntFlags::MNT_DETACH | MntFlags::UMOUNT_NOFOLLOW,
+    )?;
+
+    let tmp = Unmount(tmp, f);
     let cb = {
         let sandbox_peer = sandbox_peer.clone();
         let spec_path = spec_path.clone();
@@ -135,14 +147,5 @@ fn wait(child: ChildProcess) -> anyhow::Result<()> {
 }
 
 #[derive(Debug)]
-struct Unmount(TempDir);
-
-impl Drop for Unmount {
-    fn drop(&mut self) {
-        unmount(
-            self.0.as_path(),
-            MntFlags::MNT_DETACH | MntFlags::UMOUNT_NOFOLLOW,
-        )
-        .ok();
-    }
-}
+#[allow(dead_code)]
+struct Unmount(TempDir, File);

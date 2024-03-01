@@ -2,6 +2,8 @@
 #![feature(core_io_borrowed_buf)]
 #![feature(read_buf)]
 #![feature(thread_id_value)]
+#![feature(register_tool)]
+#![register_tool(tarpaulin)]
 
 pub mod fs;
 pub mod pool;
@@ -16,6 +18,7 @@ mod sealed {
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 pub struct PrintableBuffer<'a>(pub &'a [u8]);
 
+#[tarpaulin::skip]
 impl<'a> std::fmt::Debug for PrintableBuffer<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("b\"")?;
@@ -37,6 +40,7 @@ impl<'a> std::fmt::Debug for PrintableBuffer<'a> {
     }
 }
 
+#[tarpaulin::skip]
 impl<'a> std::fmt::Display for PrintableBuffer<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for b in self.0 {
@@ -63,6 +67,7 @@ impl<'a> EscapedBuffer<'a> {
     }
 }
 
+#[tarpaulin::skip]
 impl<'a> std::fmt::Debug for EscapedBuffer<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("b\"")?;
