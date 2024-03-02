@@ -28,8 +28,8 @@ pub struct Token<'bump> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind<'bump> {
-    String(&'bump str),
-    Bytes(&'bump [u8]),
+    String(&'bump str, StringOptions),
+    Bytes(&'bump [u8], StringOptions),
     Ident(&'bump str, IdentOptions),
     Error(ErrorKind),
     Integer(i64),
@@ -51,6 +51,23 @@ bitflags::bitflags! {
     pub struct IdentOptions: u8 {
         const HIDDEN = 0b0000_0001;
         const DECL = 0b0000_0010;
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct StringOptions: u8 {
+        const OPEN = 0b0000_0001;
+        const CLOSE = 0b0000_0010;
+        const MULTI = 0b0000_0100;
+    }
+}
+
+bitflags::bitflags! {
+    #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct InterpOptions: u8 {
+        const BYTE = 0b0000_0001;
+        const MULTI = 0b0000_0010;
     }
 }
 
@@ -94,25 +111,12 @@ struct Inner<'src, 'bump> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InterpolationUnit {
-    Char,
-    Byte,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InterpolationExtent {
-    Line,
-    Multi,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scope<'src> {
     Paren,
     Brace,
     Bracket,
     Interpolation {
-        unit: InterpolationUnit,
-        extent: InterpolationExtent,
+        options: InterpOptions,
         hashes: &'src str,
     },
 }
@@ -179,6 +183,7 @@ impl<'src, 'bump> Scanner<'src, 'bump> {
         if let Some((_, c)) = iter.next() {
             let len = iter.next().map(|(i, _)| i).unwrap_or(remainder.len());
             self.offset += len;
+            self.apply_char(c);
             Some(c)
         } else {
             None

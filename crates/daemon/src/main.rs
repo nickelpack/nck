@@ -19,6 +19,7 @@ mod string_types;
 
 fn main() -> anyhow::Result<()> {
     // TODO: Move this into each process and send traces via the channels
+    //
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
         .with(tracing_subscriber::EnvFilter::from_default_env())

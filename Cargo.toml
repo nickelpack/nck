@@ -63,8 +63,11 @@ debug-assertions = true
 overflow-checks = true
 lto = "off"
 
-[profile.dev.package.backtrace]
+[profile.dev.package."*"]
 opt-level = 3
+codegen-units = 1
+debug = false
+incremental = false
 
 [profile.dev.build-override]
 opt-level = 3

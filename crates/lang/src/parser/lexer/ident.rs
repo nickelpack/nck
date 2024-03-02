@@ -11,24 +11,17 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Ident<'src, 'bump> {
         let start = scanner.location();
 
         let mut options = IdentOptions::empty();
-        let has_start = scanner.match_start("_");
-        if has_start {
-            options |= IdentOptions::HIDDEN;
-        }
-
-        if scanner.match_start("#") {
+        if scanner.match_start("_#") {
+            options |= IdentOptions::DECL | IdentOptions::HIDDEN;
+        } else if scanner.match_start("#") {
             options |= IdentOptions::DECL;
         }
 
-        let has_start = has_start
-            || scanner
-                .advance_while(tables::derived_property::XID_Start, Some(1))
-                .is_some();
-
-        if !has_start {
-            return None;
+        if scanner.nth_char(0) == Some('_') {
+            options |= IdentOptions::HIDDEN;
         }
 
+        scanner.advance_while(tables::derived_property::XID_Start, Some(1))?;
         scanner.advance_while(tables::derived_property::XID_Continue, None);
 
         Some(Self {

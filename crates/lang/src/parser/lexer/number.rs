@@ -199,15 +199,15 @@ impl<'src, 'bump> Number<'src, 'bump> {
     fn take_num_unit(scanner: &mut Scanner<'src, 'bump>) -> i64 {
         match scanner.nth_char(0) {
             Some('K') if scanner.match_start("Ki") => 1_024,
-            Some('K') if scanner.match_start("K") => 1_000,
+            Some('K') if scanner.advance_char().is_some() => 1_000,
             Some('M') if scanner.match_start("Mi") => 1_048_576,
-            Some('M') if scanner.match_start("M") => 1_000_000,
+            Some('M') if scanner.advance_char().is_some() => 1_000_000,
             Some('G') if scanner.match_start("Gi") => 1_073_741_824,
-            Some('G') if scanner.match_start("G") => 1_000_000_000,
+            Some('G') if scanner.advance_char().is_some() => 1_000_000_000,
             Some('T') if scanner.match_start("Ti") => 1_099_511_627_776,
-            Some('T') if scanner.match_start("T") => 1_000_000_000_000,
+            Some('T') if scanner.advance_char().is_some() => 1_000_000_000_000,
             Some('P') if scanner.match_start("Pi") => 1_125_899_906_842_624,
-            Some('P') if scanner.match_start("P") => 1_000_000_000_000_000,
+            Some('P') if scanner.advance_char().is_some() => 1_000_000_000_000_000,
             _ => 1,
         }
     }
