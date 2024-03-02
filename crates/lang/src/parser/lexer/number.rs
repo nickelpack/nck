@@ -44,24 +44,26 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Number<'src, 'bump> {
         matches!(self.value, NumberValue::Err)
     }
 
-    fn accept(self, next_location: &mut Lexer<'src, 'bump>) {
+    fn accept(self, lexer: &mut Lexer<'src, 'bump>) {
         match self.value {
-            NumberValue::Integer(i) => next_location.token(
+            NumberValue::Integer(i) => lexer.token(
                 self.scanner,
                 [(self.start, TokenKind::Integer(i))].into_iter(),
             ),
-            NumberValue::Float(f) => next_location.token(
+            NumberValue::Float(f) => lexer.token(
                 self.scanner,
                 [(self.start, TokenKind::Float(f))].into_iter(),
             ),
-            NumberValue::Err => next_location.token(
-                self.scanner,
-                [(
-                    self.start,
-                    TokenKind::Error(ErrorKind::InvalidNumberLiteral),
-                )]
-                .into_iter(),
-            ),
+            NumberValue::Err => {
+                lexer.error(
+                    &self.scanner,
+                    [(self.start, ErrorKind::InvalidNumberLiteral)].into_iter(),
+                );
+                lexer.token(
+                    self.scanner,
+                    [(self.start, TokenKind::Integer(0))].into_iter(),
+                )
+            }
         }
     }
 }
@@ -259,6 +261,7 @@ mod test {
             r,
             (
                 2,
+                vec![make_token(bump, 0..2, 0, 0, TokenKind::Integer(0))],
                 vec![make_error(
                     bump,
                     0..2,
@@ -279,6 +282,7 @@ mod test {
             r,
             (
                 2,
+                vec![make_token(bump, 0..2, 0, 0, TokenKind::Integer(0))],
                 vec![make_error(
                     bump,
                     0..2,
@@ -299,6 +303,7 @@ mod test {
             r,
             (
                 2,
+                vec![make_token(bump, 0..2, 0, 0, TokenKind::Integer(0))],
                 vec![make_error(
                     bump,
                     0..2,
@@ -319,6 +324,7 @@ mod test {
             r,
             (
                 3,
+                vec![make_token(bump, 0..3, 0, 0, TokenKind::Integer(0))],
                 vec![make_error(
                     bump,
                     0..3,
@@ -339,6 +345,7 @@ mod test {
             r,
             (
                 5,
+                vec![make_token(bump, 0..5, 0, 0, TokenKind::Integer(0))],
                 vec![make_error(
                     bump,
                     0..5,
@@ -359,7 +366,8 @@ mod test {
             r,
             (
                 5,
-                vec![make_token(bump, 0..5, 0, 0, TokenKind::Integer(1234))]
+                vec![make_token(bump, 0..5, 0, 0, TokenKind::Integer(1234))],
+                vec![]
             )
         )
     }
@@ -379,7 +387,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(ten_pow(1234, 1))
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -393,7 +402,8 @@ mod test {
             r,
             (
                 7,
-                vec![make_token(bump, 0..7, 0, 0, TokenKind::Integer(0xAE01))]
+                vec![make_token(bump, 0..7, 0, 0, TokenKind::Integer(0xAE01))],
+                vec![]
             )
         )
     }
@@ -413,7 +423,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(two_pow(0xAE01, 1))
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -427,7 +438,8 @@ mod test {
             r,
             (
                 6,
-                vec![make_token(bump, 0..6, 0, 0, TokenKind::Integer(0o774))]
+                vec![make_token(bump, 0..6, 0, 0, TokenKind::Integer(0o774))],
+                vec![]
             )
         )
     }
@@ -447,7 +459,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(ten_pow(0o774, 2))
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -461,7 +474,8 @@ mod test {
             r,
             (
                 9,
-                vec![make_token(bump, 0..9, 0, 0, TokenKind::Integer(0b001001))]
+                vec![make_token(bump, 0..9, 0, 0, TokenKind::Integer(0b001001))],
+                vec![]
             )
         )
     }
@@ -481,7 +495,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(two_pow(0b001001, 2))
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -495,7 +510,8 @@ mod test {
             r,
             (
                 8,
-                vec![make_token(bump, 0..8, 0, 0, TokenKind::Float(100.123))]
+                vec![make_token(bump, 0..8, 0, 0, TokenKind::Float(100.123))],
+                vec![]
             )
         )
     }
@@ -515,7 +531,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(ten_pow(100.123, 3))
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -529,7 +546,8 @@ mod test {
             r,
             (
                 6,
-                vec![make_token(bump, 0..6, 0, 0, TokenKind::Float(0.1234))]
+                vec![make_token(bump, 0..6, 0, 0, TokenKind::Float(0.1234))],
+                vec![]
             )
         )
     }
@@ -549,7 +567,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(two_pow(0.1234, 3))
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -563,7 +582,8 @@ mod test {
             r,
             (
                 9,
-                vec![make_token(bump, 0..9, 0, 0, TokenKind::Float(0.1234e4))]
+                vec![make_token(bump, 0..9, 0, 0, TokenKind::Float(0.1234e4))],
+                vec![]
             )
         )
     }
@@ -583,7 +603,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(ten_pow(0.1234e4, 4))
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -597,7 +618,8 @@ mod test {
             r,
             (
                 10,
-                vec![make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e4))]
+                vec![make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e4))],
+                vec![]
             )
         )
     }
@@ -617,7 +639,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(two_pow(0.1234e4, 4))
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -631,7 +654,8 @@ mod test {
             r,
             (
                 10,
-                vec![make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e-4))]
+                vec![make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e-4))],
+                vec![]
             )
         )
     }
@@ -651,7 +675,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(ten_pow(0.1234e-4, 5))
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -671,7 +696,8 @@ mod test {
                     0,
                     0,
                     TokenKind::Integer(two_pow(0.1234e-4, 5))
-                )]
+                )],
+                vec![]
             )
         )
     }

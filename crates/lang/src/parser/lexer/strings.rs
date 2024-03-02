@@ -160,12 +160,8 @@ impl<'src, 'bump, T: StrType> TokenLexer<'src, 'bump> for StringLexeme<'src, 'bu
 
     fn accept(self, lexer: &mut super::Lexer<'src, 'bump>) {
         let tok = self.result.make_token(self.scanner.bump(), self.options);
-        let tokens = self
-            .errors
-            .into_iter()
-            .map(|(l, e)| (l, super::TokenKind::Error(e)))
-            .chain([(self.start, tok)]);
-        lexer.token(self.scanner, tokens);
+        lexer.error(&self.scanner, self.errors.into_iter());
+        lexer.token(self.scanner, [(self.start, tok)].into_iter());
         if let Some(next) = self.next {
             lexer.push_scope(next)
         }
@@ -311,7 +307,8 @@ mod test {
                         bump.alloc_str("foo\x07\x08\x0C\n\r\t\x0B/\\\u{FEEE}\u{10000}"),
                         StringOptions::OPEN | StringOptions::CLOSE
                     )
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -343,7 +340,8 @@ mod test {
                         ),
                         StringOptions::OPEN | StringOptions::CLOSE
                     )
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -357,21 +355,21 @@ mod test {
             r,
             (
                 26,
+                vec![make_token(
+                    bump,
+                    0..26,
+                    0,
+                    0,
+                    TokenKind::String(
+                        bump.alloc_str("foozhellFEEEFEEEa"),
+                        StringOptions::OPEN | StringOptions::CLOSE
+                    )
+                )],
                 vec![
                     make_error(bump, 4..5, 0, 4, ErrorKind::BadEscapeSequence),
                     make_error(bump, 6..8, 0, 6, ErrorKind::BadEscapeSequence),
                     make_error(bump, 12..14, 0, 12, ErrorKind::BadEscapeSequence),
                     make_error(bump, 22..24, 0, 22, ErrorKind::BadEscapeSequence),
-                    make_token(
-                        bump,
-                        0..26,
-                        0,
-                        0,
-                        TokenKind::String(
-                            bump.alloc_str("foozhellFEEEFEEEa"),
-                            StringOptions::OPEN | StringOptions::CLOSE
-                        )
-                    )
                 ]
             )
         )
@@ -405,7 +403,8 @@ mod test {
                         ),
                         StringOptions::OPEN | StringOptions::CLOSE
                     )
-                )]
+                )],
+                vec![]
             )
         )
     }
@@ -419,22 +418,22 @@ mod test {
             r,
             (
                 29,
+                vec![make_token(
+                    bump,
+                    0..29,
+                    0,
+                    0,
+                    TokenKind::Bytes(
+                        bump.alloc_slice_copy(b"foozhellFEEEFEEEae"),
+                        StringOptions::OPEN | StringOptions::CLOSE
+                    )
+                )],
                 vec![
                     make_error(bump, 4..5, 0, 4, ErrorKind::BadEscapeSequence),
                     make_error(bump, 6..8, 0, 6, ErrorKind::BadEscapeSequence),
                     make_error(bump, 12..14, 0, 12, ErrorKind::BadEscapeSequence),
                     make_error(bump, 22..24, 0, 22, ErrorKind::BadEscapeSequence),
                     make_error(bump, 25..27, 0, 25, ErrorKind::BadEscapeSequence),
-                    make_token(
-                        bump,
-                        0..29,
-                        0,
-                        0,
-                        TokenKind::Bytes(
-                            bump.alloc_slice_copy(b"foozhellFEEEFEEEae"),
-                            StringOptions::OPEN | StringOptions::CLOSE
-                        )
-                    )
                 ]
             )
         )
