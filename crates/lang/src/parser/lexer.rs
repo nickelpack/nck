@@ -29,6 +29,7 @@ pub struct Token<'bump> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind<'bump> {
     String(&'bump str),
+    Bytes(&'bump [u8]),
     Ident(&'bump str, IdentOptions),
     Error(ErrorKind),
     Integer(i64),
@@ -179,6 +180,21 @@ impl<'src, 'bump> Scanner<'src, 'bump> {
             let len = iter.next().map(|(i, _)| i).unwrap_or(remainder.len());
             self.offset += len;
             Some(c)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn get_chars(&mut self, len: usize) -> Option<&'src str> {
+        if len == 0 {
+            return Some("");
+        }
+
+        let start = self.offset;
+        let remainder = self.remainder();
+        if remainder.len() >= len {
+            Some(&remainder[..len])
         } else {
             None
         }
