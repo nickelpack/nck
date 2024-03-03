@@ -17,7 +17,6 @@ use bumpalo::Bump;
 use super::Location;
 
 mod ident;
-mod keywords;
 mod number;
 mod operators;
 mod strings;

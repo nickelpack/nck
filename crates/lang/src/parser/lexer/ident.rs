@@ -29,7 +29,6 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Ident<'src, 'bump> {
             options |= IdentOptions::HIDDEN;
         }
 
-        dbg!(&scanner.remainder());
         scanner.advance_while(is_start, Some(1))?;
         scanner.advance_while(tables::derived_property::XID_Continue, None);
 
@@ -45,7 +44,18 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Ident<'src, 'bump> {
     }
 
     fn accept(self, lexer: &mut Lexer<'src, 'bump>) {
-        let result = TokenKind::Ident(self.scanner.alloc_str_here(self.start), self.options);
+        let s = self.scanner.get_str(self.start);
+        let result = match s {
+            "null" => TokenKind::Null,
+            "true" => TokenKind::True,
+            "false" => TokenKind::False,
+            "for" => TokenKind::For,
+            "in" => TokenKind::In,
+            "let" => TokenKind::Let,
+            "if" => TokenKind::If,
+            other => TokenKind::Ident(self.scanner.bump().alloc_str(other), self.options),
+        };
+
         lexer.token(self.scanner, [(self.start, result)].into_iter());
     }
 }
@@ -100,5 +110,54 @@ mod test {
             bump.alloc_str("#_foo"),
             IdentOptions::HIDDEN | IdentOptions::DECL
         )
+    )]);
+
+    test_lexer!(null_keyword, Ident, r#"null"#, 4, |bump| [(
+        0..4,
+        0,
+        0,
+        TokenKind::Null
+    )]);
+
+    test_lexer!(true_keyword, Ident, r#"true"#, 4, |bump| [(
+        0..4,
+        0,
+        0,
+        TokenKind::True
+    )]);
+
+    test_lexer!(false_keyword, Ident, r#"false"#, 5, |bump| [(
+        0..5,
+        0,
+        0,
+        TokenKind::False
+    )]);
+
+    test_lexer!(for_keyword, Ident, r#"for"#, 3, |bump| [(
+        0..3,
+        0,
+        0,
+        TokenKind::For
+    )]);
+
+    test_lexer!(in_keyword, Ident, r#"in"#, 2, |bump| [(
+        0..2,
+        0,
+        0,
+        TokenKind::In
+    )]);
+
+    test_lexer!(let_keyword, Ident, r#"let"#, 3, |bump| [(
+        0..3,
+        0,
+        0,
+        TokenKind::Let
+    )]);
+
+    test_lexer!(if_keyword, Ident, r#"if"#, 2, |bump| [(
+        0..2,
+        0,
+        0,
+        TokenKind::If
     )]);
 }

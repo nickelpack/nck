@@ -178,8 +178,6 @@ impl<'src, 'bump> Number<'src, 'bump> {
         }
 
         let unit = Self::take_num_unit(&mut scanner);
-        dbg!(unit);
-
         if let Some(s) = i64::from_str_radix(&tmp, radix)
             .ok()
             .and_then(|v| v.checked_mul(unit))
