@@ -132,13 +132,13 @@ impl<'src, 'bump, T: StrType> TokenLexer<'src, 'bump> for StringLexeme<'src, 'bu
             .advance_while(|c| c == '#', None)
             .unwrap_or("");
 
-        match (hashes, result.scanner.nth_char(0), lexer.peek_scope()) {
-            ("", Some(')'), Some(Scope::Interpolation { options, hashes }))
+        match (hashes, result.scanner.nth_char(0)?, lexer.peek_scope()) {
+            ("", ')', Some(Scope::Interpolation { options, hashes }))
                 if T::matches(options) && result.scanner.advance_char().is_some() =>
             {
                 result.lex_impl(hashes, options)
             }
-            (hashes, Some('"' | '\''), _)
+            (hashes, '"' | '\'', _)
                 if result
                     .scanner
                     .match_start(T::delimiter(InterpOptions::MULTI)) =>
@@ -146,7 +146,7 @@ impl<'src, 'bump, T: StrType> TokenLexer<'src, 'bump> for StringLexeme<'src, 'bu
                 result.options |= StringOptions::OPEN;
                 result.lex_impl(hashes, InterpOptions::MULTI | T::FLAG)
             }
-            (hashes, Some('"' | '\''), _) if result.scanner.advance_char().is_some() => {
+            (hashes, '"' | '\'', _) if result.scanner.advance_char().is_some() => {
                 result.options |= StringOptions::OPEN;
                 result.lex_impl(hashes, T::FLAG)
             }
@@ -272,170 +272,115 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
 
 #[cfg(test)]
 mod test {
-    use bumpalo::Bump;
-
-    use crate::parser::lexer::{
-        test::{make_error, make_token, test_lexer},
-        ErrorKind, IdentOptions, StringOptions, TokenKind,
+    use crate::{
+        parser::lexer::{ErrorKind, StringOptions, TokenKind},
+        test_lexer,
     };
 
     use super::{BytesStr, CharStr};
     use pretty_assertions::assert_eq;
 
-    #[test]
-    fn string_none() {
-        let bump = Bump::new();
-        let r = test_lexer::<CharStr>(r#"123"#, &bump);
-        assert_eq!(r, None);
-    }
+    test_lexer!(no_string, CharStr, r#"123"#);
 
-    #[test]
-    fn string_simple() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<CharStr>(r#""foo\a\b\f\n\r\t\v\/\\\uFEEE\U00010000""#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                39,
-                vec![make_token(
-                    bump,
-                    0..39,
-                    0,
-                    0,
-                    TokenKind::String(
-                        bump.alloc_str("foo\x07\x08\x0C\n\r\t\x0B/\\\u{FEEE}\u{10000}"),
-                        StringOptions::OPEN | StringOptions::CLOSE
-                    )
-                )],
-                vec![]
+    test_lexer!(
+        simple_string,
+        CharStr,
+        r#""foo\a\b\f\n\r\t\v\/\\\uFEEE\U00010000""#,
+        39,
+        |bump| [(
+            0..39,
+            0,
+            0,
+            TokenKind::String(
+                bump.alloc_str("foo\x07\x08\x0C\n\r\t\x0B/\\\u{FEEE}\u{10000}"),
+                StringOptions::OPEN | StringOptions::CLOSE
             )
-        )
-    }
+        )]
+    );
 
-    #[test]
-    fn string_simple_multi() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<CharStr>(
-            r#""""
+    test_lexer!(
+        simple_string_multi,
+        CharStr,
+        r#""""
             foo\a\b\f\n
             \r\t\v\/\\\uFEEE\U00010000
             """"#,
-            bump,
-        )
-        .unwrap();
-        assert_eq!(
-            r,
-            (
-                82,
-                vec![make_token(
-                    bump,
-                    0..82,
-                    0,
-                    0,
-                    TokenKind::String(
-                        bump.alloc_str(
-                            "\n            foo\u{7}\u{8}\u{c}\n\n            \r\t\u{b}/\\ﻮ𐀀\n            "
-                        ),
-                        StringOptions::OPEN | StringOptions::CLOSE
-                    )
-                )],
-                vec![]
+        82,
+        |bump| [(
+            0..82,
+            0,
+            0,
+            TokenKind::String(
+                bump.alloc_str(
+                    "\n            foo\u{7}\u{8}\u{c}\n\n            \r\t\u{b}/\\ﻮ𐀀\n            "
+                ),
+                StringOptions::OPEN | StringOptions::CLOSE
             )
-        )
-    }
+        )]
+    );
 
-    #[test]
-    fn string_bad_escape() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<CharStr>(r#""foo\z\uhell\UFEEEFEEE\ua"b"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                26,
-                vec![make_token(
-                    bump,
-                    0..26,
-                    0,
-                    0,
-                    TokenKind::String(
-                        bump.alloc_str("foozhellFEEEFEEEa"),
-                        StringOptions::OPEN | StringOptions::CLOSE
-                    )
-                )],
-                vec![
-                    make_error(bump, 4..5, 0, 4, ErrorKind::BadEscapeSequence),
-                    make_error(bump, 6..8, 0, 6, ErrorKind::BadEscapeSequence),
-                    make_error(bump, 12..14, 0, 12, ErrorKind::BadEscapeSequence),
-                    make_error(bump, 22..24, 0, 22, ErrorKind::BadEscapeSequence),
-                ]
+    test_lexer!(
+        simple_bad_escape,
+        CharStr,
+        r#""foo\z\uhell\UFEEEFEEE\ua"b"#,
+        26,
+        |bump| [(
+            0..26,
+            0,
+            0,
+            TokenKind::String(
+                bump.alloc_str("foozhellFEEEFEEEa"),
+                StringOptions::OPEN | StringOptions::CLOSE
             )
-        )
-    }
+        )],
+        |bump| [
+            (4..5, 0, 4, ErrorKind::BadEscapeSequence),
+            (6..8, 0, 6, ErrorKind::BadEscapeSequence),
+            (12..14, 0, 12, ErrorKind::BadEscapeSequence),
+            (22..24, 0, 22, ErrorKind::BadEscapeSequence)
+        ]
+    );
 
-    #[test]
-    fn bytes_none() {
-        let bump = Bump::new();
-        let r = test_lexer::<BytesStr>(r#"123"#, &bump);
-        assert_eq!(r, None);
-    }
+    test_lexer!(no_bytes, BytesStr, r#"123"#);
 
-    #[test]
-    fn bytes_simple() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<BytesStr>(r#"'foo\a\b\f\n\r\t\v\/\\\uFEEE\U00010000\xDE\xae'"#, bump)
-            .unwrap();
-        assert_eq!(
-            r,
-            (
-                47,
-                vec![make_token(
-                    bump,
-                    0..47,
-                    0,
-                    0,
-                    TokenKind::Bytes(
-                        bump.alloc_slice_copy(
-                            b"foo\x07\x08\x0C\n\r\t\x0B/\\\xEF\xBB\xAE\xF0\x90\x80\x80\xde\xae"
-                        ),
-                        StringOptions::OPEN | StringOptions::CLOSE
-                    )
-                )],
-                vec![]
+    test_lexer!(
+        bytes_simple,
+        BytesStr,
+        r#"'foo\a\b\f\n\r\t\v\/\\\uFEEE\U00010000\xDE\xae'"#,
+        47,
+        |bump| [(
+            0..47,
+            0,
+            0,
+            TokenKind::Bytes(
+                bump.alloc_slice_copy(
+                    b"foo\x07\x08\x0C\n\r\t\x0B/\\\xEF\xBB\xAE\xF0\x90\x80\x80\xde\xae"
+                ),
+                StringOptions::OPEN | StringOptions::CLOSE
             )
-        )
-    }
+        )]
+    );
 
-    #[test]
-    fn bytes_bad_escape() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<BytesStr>(r#"'foo\z\uhell\UFEEEFEEE\ua\xe'b"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                29,
-                vec![make_token(
-                    bump,
-                    0..29,
-                    0,
-                    0,
-                    TokenKind::Bytes(
-                        bump.alloc_slice_copy(b"foozhellFEEEFEEEae"),
-                        StringOptions::OPEN | StringOptions::CLOSE
-                    )
-                )],
-                vec![
-                    make_error(bump, 4..5, 0, 4, ErrorKind::BadEscapeSequence),
-                    make_error(bump, 6..8, 0, 6, ErrorKind::BadEscapeSequence),
-                    make_error(bump, 12..14, 0, 12, ErrorKind::BadEscapeSequence),
-                    make_error(bump, 22..24, 0, 22, ErrorKind::BadEscapeSequence),
-                    make_error(bump, 25..27, 0, 25, ErrorKind::BadEscapeSequence),
-                ]
+    test_lexer!(
+        bytes_bad_escape,
+        BytesStr,
+        r#"'foo\z\uhell\UFEEEFEEE\ua\xe'b"#,
+        29,
+        |bump| [(
+            0..29,
+            0,
+            0,
+            TokenKind::Bytes(
+                bump.alloc_slice_copy(b"foozhellFEEEFEEEae"),
+                StringOptions::OPEN | StringOptions::CLOSE
             )
-        )
-    }
+        )],
+        |bump| [
+            (4..5, 0, 4, ErrorKind::BadEscapeSequence),
+            (6..8, 0, 6, ErrorKind::BadEscapeSequence),
+            (12..14, 0, 12, ErrorKind::BadEscapeSequence),
+            (22..24, 0, 22, ErrorKind::BadEscapeSequence),
+            (25..27, 0, 25, ErrorKind::BadEscapeSequence)
+        ]
+    );
 }

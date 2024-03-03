@@ -52,132 +52,53 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Ident<'src, 'bump> {
 
 #[cfg(test)]
 mod test {
-    use bumpalo::Bump;
-
-    use crate::parser::lexer::{
-        test::{make_token, test_lexer},
-        IdentOptions, TokenKind,
+    use crate::{
+        parser::lexer::{IdentOptions, TokenKind},
+        test_lexer,
     };
-
-    use pretty_assertions::assert_eq;
 
     use super::Ident;
 
-    #[test]
-    fn no_ident() {
-        let bump = Bump::new();
-        let r = test_lexer::<Ident>(r#"123"#, &bump);
-        assert_eq!(r, None);
-    }
+    test_lexer!(no_ident, Ident, r#"123"#);
 
-    #[test]
-    fn simple_ident() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Ident>(r#"foo"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                3,
-                vec![make_token(
-                    bump,
-                    0..3,
-                    0,
-                    0,
-                    TokenKind::Ident(bump.alloc_str("foo"), IdentOptions::empty())
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(simple_ident, Ident, r#"foo"#, 3, |bump| [(
+        0..3,
+        0,
+        0,
+        TokenKind::Ident(bump.alloc_str("foo"), IdentOptions::empty())
+    )]);
 
-    #[test]
-    fn hidden_ident() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Ident>(r#"_foo"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                4,
-                vec![make_token(
-                    bump,
-                    0..4,
-                    0,
-                    0,
-                    TokenKind::Ident(bump.alloc_str("_foo"), IdentOptions::HIDDEN)
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(hidden_ident, Ident, r#"_foo"#, 4, |bump| [(
+        0..4,
+        0,
+        0,
+        TokenKind::Ident(bump.alloc_str("_foo"), IdentOptions::HIDDEN)
+    )]);
 
-    #[test]
-    fn decl_ident() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Ident>(r#"#foo"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                4,
-                vec![make_token(
-                    bump,
-                    0..4,
-                    0,
-                    0,
-                    TokenKind::Ident(bump.alloc_str("#foo"), IdentOptions::DECL)
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(decl_ident, Ident, r#"#foo"#, 4, |bump| [(
+        0..4,
+        0,
+        0,
+        TokenKind::Ident(bump.alloc_str("#foo"), IdentOptions::DECL)
+    )]);
 
-    #[test]
-    fn hidden_decl_ident() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Ident>(r#"_#foo"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                5,
-                vec![make_token(
-                    bump,
-                    0..5,
-                    0,
-                    0,
-                    TokenKind::Ident(
-                        bump.alloc_str("_#foo"),
-                        IdentOptions::HIDDEN | IdentOptions::DECL
-                    )
-                )],
-                vec![]
-            )
+    test_lexer!(hidden_decl_ident, Ident, r#"_#foo"#, 5, |bump| [(
+        0..5,
+        0,
+        0,
+        TokenKind::Ident(
+            bump.alloc_str("_#foo"),
+            IdentOptions::HIDDEN | IdentOptions::DECL
         )
-    }
+    )]);
 
-    #[test]
-    fn hidden_decl_ident_2() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Ident>(r#"#_foo"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                5,
-                vec![make_token(
-                    bump,
-                    0..5,
-                    0,
-                    0,
-                    TokenKind::Ident(
-                        bump.alloc_str("#_foo"),
-                        IdentOptions::HIDDEN | IdentOptions::DECL
-                    )
-                )],
-                vec![]
-            )
+    test_lexer!(hidden_decl_ident_2, Ident, r#"#_foo"#, 5, |bump| [(
+        0..5,
+        0,
+        0,
+        TokenKind::Ident(
+            bump.alloc_str("#_foo"),
+            IdentOptions::HIDDEN | IdentOptions::DECL
         )
-    }
+    )]);
 }

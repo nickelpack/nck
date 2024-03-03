@@ -217,11 +217,12 @@ impl<'src, 'bump> Number<'src, 'bump> {
 
 #[cfg(test)]
 mod test {
-    use bumpalo::Bump;
-
-    use crate::parser::lexer::{
-        test::{make_error, make_token, test_lexer},
-        ErrorKind, TokenKind,
+    use crate::{
+        parser::lexer::{
+            test::{make_error, make_token},
+            ErrorKind, TokenKind,
+        },
+        test_lexer,
     };
 
     use pretty_assertions::assert_eq;
@@ -238,467 +239,183 @@ mod test {
         (v * 2f64.powi(i * 10)) as i64
     }
 
-    #[test]
-    fn no_number() {
-        let bump = Bump::new();
-        let r = test_lexer::<Number>(r#"abc"#, &bump);
-        assert_eq!(r, None);
-    }
+    test_lexer!(no_integer, Number, r#"abc"#);
+    test_lexer!(no_float, Number, r#".abc"#);
 
-    #[test]
-    fn no_float_number() {
-        let bump = Bump::new();
-        let r = test_lexer::<Number>(r#".abc"#, &bump);
-        assert_eq!(r, None);
-    }
+    test_lexer!(
+        bad_hex,
+        Number,
+        r#"0xZ"#,
+        2,
+        |bump| [(0..2, 0, 0, TokenKind::Integer(0))],
+        |bump| [(0..2, 0, 0, ErrorKind::InvalidNumberLiteral)]
+    );
 
-    #[test]
-    fn bad_hex() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"0xZ"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                2,
-                vec![make_token(bump, 0..2, 0, 0, TokenKind::Integer(0))],
-                vec![make_error(
-                    bump,
-                    0..2,
-                    0,
-                    0,
-                    ErrorKind::InvalidNumberLiteral
-                )]
-            )
-        );
-    }
+    test_lexer!(
+        bad_oct,
+        Number,
+        r#"0o8"#,
+        2,
+        |bump| [(0..2, 0, 0, TokenKind::Integer(0))],
+        |bump| [(0..2, 0, 0, ErrorKind::InvalidNumberLiteral)]
+    );
 
-    #[test]
-    fn bad_oct() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"0o8"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                2,
-                vec![make_token(bump, 0..2, 0, 0, TokenKind::Integer(0))],
-                vec![make_error(
-                    bump,
-                    0..2,
-                    0,
-                    0,
-                    ErrorKind::InvalidNumberLiteral
-                )]
-            )
-        );
-    }
+    test_lexer!(
+        bad_bin,
+        Number,
+        r#"0b2"#,
+        2,
+        |bump| [(0..2, 0, 0, TokenKind::Integer(0))],
+        |bump| [(0..2, 0, 0, ErrorKind::InvalidNumberLiteral)]
+    );
 
-    #[test]
-    fn bad_bin() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"0b2"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                2,
-                vec![make_token(bump, 0..2, 0, 0, TokenKind::Integer(0))],
-                vec![make_error(
-                    bump,
-                    0..2,
-                    0,
-                    0,
-                    ErrorKind::InvalidNumberLiteral
-                )]
-            )
-        );
-    }
+    test_lexer!(
+        bad_float_1,
+        Number,
+        r#"04ea"#,
+        3,
+        |bump| [(0..3, 0, 0, TokenKind::Integer(0))],
+        |bump| [(0..3, 0, 0, ErrorKind::InvalidNumberLiteral)]
+    );
 
-    #[test]
-    fn bad_float_1() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"04ea"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                3,
-                vec![make_token(bump, 0..3, 0, 0, TokenKind::Integer(0))],
-                vec![make_error(
-                    bump,
-                    0..3,
-                    0,
-                    0,
-                    ErrorKind::InvalidNumberLiteral
-                )]
-            )
-        );
-    }
+    test_lexer!(
+        bad_float_2,
+        Number,
+        r#"04e__"#,
+        5,
+        |bump| [(0..5, 0, 0, TokenKind::Integer(0))],
+        |bump| [(0..5, 0, 0, ErrorKind::InvalidNumberLiteral)]
+    );
 
-    #[test]
-    fn bad_float_2() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"04e__"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                5,
-                vec![make_token(bump, 0..5, 0, 0, TokenKind::Integer(0))],
-                vec![make_error(
-                    bump,
-                    0..5,
-                    0,
-                    0,
-                    ErrorKind::InvalidNumberLiteral
-                )]
-            )
-        );
-    }
+    test_lexer!(integer, Number, r#"1_234"#, 5, |bump| [(
+        0..5,
+        0,
+        0,
+        TokenKind::Integer(1234)
+    )]);
 
-    #[test]
-    fn integer() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"1_234"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                5,
-                vec![make_token(bump, 0..5, 0, 0, TokenKind::Integer(1234))],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(integer_units, Number, r#"1_234K"#, 6, |bump| [(
+        0..6,
+        0,
+        0,
+        TokenKind::Integer(ten_pow(1234, 1))
+    )]);
 
-    #[test]
-    fn integer_units() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"123_4K"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                6,
-                vec![make_token(
-                    bump,
-                    0..6,
-                    0,
-                    0,
-                    TokenKind::Integer(ten_pow(1234, 1))
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(hex, Number, r#"0xAE0_1"#, 7, |bump| [(
+        0..7,
+        0,
+        0,
+        TokenKind::Integer(0xAE01)
+    )]);
 
-    #[test]
-    fn hex() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"0xAE0_1"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                7,
-                vec![make_token(bump, 0..7, 0, 0, TokenKind::Integer(0xAE01))],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(hex_units, Number, r#"0xAE0_1Ki"#, 9, |bump| [(
+        0..9,
+        0,
+        0,
+        TokenKind::Integer(two_pow(0xAE01, 1))
+    )]);
 
-    #[test]
-    fn hex_units() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"0xA_E01Ki"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                9,
-                vec![make_token(
-                    bump,
-                    0..9,
-                    0,
-                    0,
-                    TokenKind::Integer(two_pow(0xAE01, 1))
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(oct, Number, r#"0o77_4"#, 6, |bump| [(
+        0..6,
+        0,
+        0,
+        TokenKind::Integer(0o774)
+    )]);
 
-    #[test]
-    fn oct() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"0o77_4"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                6,
-                vec![make_token(bump, 0..6, 0, 0, TokenKind::Integer(0o774))],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(oct_units, Number, r#"0o77_4M"#, 7, |bump| [(
+        0..7,
+        0,
+        0,
+        TokenKind::Integer(ten_pow(0o774, 2))
+    )]);
 
-    #[test]
-    fn oct_units() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"0o7_74M"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                7,
-                vec![make_token(
-                    bump,
-                    0..7,
-                    0,
-                    0,
-                    TokenKind::Integer(ten_pow(0o774, 2))
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(bin, Number, r#"0b00_1001"#, 9, |bump| [(
+        0..9,
+        0,
+        0,
+        TokenKind::Integer(0b001001)
+    )]);
 
-    #[test]
-    fn bin() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"0b00_1001"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                9,
-                vec![make_token(bump, 0..9, 0, 0, TokenKind::Integer(0b001001))],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(bin_units, Number, r#"0b00_1001Mi"#, 11, |bump| [(
+        0..11,
+        0,
+        0,
+        TokenKind::Integer(two_pow(0b001001, 2))
+    )]);
 
-    #[test]
-    fn bin_units() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"0b001001_Mi"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                11,
-                vec![make_token(
-                    bump,
-                    0..11,
-                    0,
-                    0,
-                    TokenKind::Integer(two_pow(0b001001, 2))
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(float, Number, r#"10_0.123"#, 8, |bump| [(
+        0..8,
+        0,
+        0,
+        TokenKind::Float(100.123)
+    )]);
 
-    #[test]
-    fn float() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"10_0.123"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                8,
-                vec![make_token(bump, 0..8, 0, 0, TokenKind::Float(100.123))],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(float_units, Number, r#"10_0.123G"#, 9, |bump| [(
+        0..9,
+        0,
+        0,
+        TokenKind::Integer(ten_pow(100.123, 3))
+    )]);
 
-    #[test]
-    fn float_units() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#"100._123G"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                9,
-                vec![make_token(
-                    bump,
-                    0..9,
-                    0,
-                    0,
-                    TokenKind::Integer(ten_pow(100.123, 3))
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(small_float, Number, r#".123_4"#, 6, |bump| [(
+        0..6,
+        0,
+        0,
+        TokenKind::Float(0.1234)
+    )]);
 
-    #[test]
-    fn small_float() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#".123_4"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                6,
-                vec![make_token(bump, 0..6, 0, 0, TokenKind::Float(0.1234))],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(small_float_units, Number, r#".123_4G"#, 7, |bump| [(
+        0..7,
+        0,
+        0,
+        TokenKind::Integer(ten_pow(0.1234, 3))
+    )]);
 
-    #[test]
-    fn small_float_units() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#".1_234Gi"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                8,
-                vec![make_token(
-                    bump,
-                    0..8,
-                    0,
-                    0,
-                    TokenKind::Integer(two_pow(0.1234, 3))
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(expo_float, Number, r#".123_4e_4"#, 9, |bump| [(
+        0..9,
+        0,
+        0,
+        TokenKind::Float(0.1234e4)
+    )]);
 
-    #[test]
-    fn expo_float() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#".123_4e_4"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                9,
-                vec![make_token(bump, 0..9, 0, 0, TokenKind::Float(0.1234e4))],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(expo_float_units, Number, r#".123_4e_4T"#, 10, |bump| [(
+        0..10,
+        0,
+        0,
+        TokenKind::Integer(ten_pow(0.1234e4, 4))
+    )]);
 
-    #[test]
-    fn expo_float_units() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#".1_234e4_T"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                10,
-                vec![make_token(
-                    bump,
-                    0..10,
-                    0,
-                    0,
-                    TokenKind::Integer(ten_pow(0.1234e4, 4))
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(pos_expo_float, Number, r#".123_4e+_4"#, 10, |bump| [(
+        0..10,
+        0,
+        0,
+        TokenKind::Float(0.1234e4)
+    )]);
 
-    #[test]
-    fn pos_expo_float() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#".123_4e+_4"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                10,
-                vec![make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e4))],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(
+        pos_expo_float_units,
+        Number,
+        r#".123_4e+_4Ti"#,
+        12,
+        |bump| [(0..12, 0, 0, TokenKind::Integer(two_pow(0.1234e4, 4)))]
+    );
 
-    #[test]
-    fn pos_expo_float_units() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#".1_234e+4_Ti"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                12,
-                vec![make_token(
-                    bump,
-                    0..12,
-                    0,
-                    0,
-                    TokenKind::Integer(two_pow(0.1234e4, 4))
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(neg_expo_float, Number, r#".123_4e-_4"#, 10, |bump| [(
+        0..10,
+        0,
+        0,
+        TokenKind::Float(0.1234e-4)
+    )]);
 
-    #[test]
-    fn neg_expo_float() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#".123_4e-_4"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                10,
-                vec![make_token(bump, 0..10, 0, 0, TokenKind::Float(0.1234e-4))],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(neg_expo_float_units, Number, r#".123_4e-_4P"#, 11, |bump| [
+        (0..11, 0, 0, TokenKind::Integer(ten_pow(0.1234e-4, 5)))
+    ]);
 
-    #[test]
-    fn neg_expo_float_units() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#".1_234e-4_P"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                11,
-                vec![make_token(
-                    bump,
-                    0..11,
-                    0,
-                    0,
-                    TokenKind::Integer(ten_pow(0.1234e-4, 5))
-                )],
-                vec![]
-            )
-        )
-    }
-
-    #[test]
-    fn neg_expo_float_units_pebi() {
-        let bump = Bump::new();
-        let bump = &bump;
-        let r = test_lexer::<Number>(r#".1_234e-4_Pi"#, bump).unwrap();
-        assert_eq!(
-            r,
-            (
-                12,
-                vec![make_token(
-                    bump,
-                    0..12,
-                    0,
-                    0,
-                    TokenKind::Integer(two_pow(0.1234e-4, 5))
-                )],
-                vec![]
-            )
-        )
-    }
+    test_lexer!(
+        neg_expo_float_units_pebi,
+        Number,
+        r#".123_4e-_4Pi"#,
+        12,
+        |bump| [(0..12, 0, 0, TokenKind::Integer(two_pow(0.1234e-4, 5)))]
+    );
 }

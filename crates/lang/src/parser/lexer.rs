@@ -15,9 +15,13 @@ use bitflags::Flags;
 use bumpalo::Bump;
 
 use super::Location;
+
 mod ident;
+mod keywords;
 mod number;
+mod operators;
 mod strings;
+mod surrounds;
 mod tables;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,12 +37,60 @@ pub struct Error<'bump> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum CommaKind {
+    Explicit,
+    Automatic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BinaryOperator {
+    Add,
+    Sub,
+    Div,
+    Mul,
+    LogicalAnd,
+    And,
+    LogicalOr,
+    Or,
+    Inequal,
+    ApproxInequal,
+    Equal,
+    ApproxEqual,
+    LessEqual,
+    Less,
+    GreaterEqual,
+    Greater,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind<'bump> {
     String(&'bump str, StringOptions),
     Bytes(&'bump [u8], StringOptions),
     Ident(&'bump str, IdentOptions),
     Integer(i64),
     Float(f64),
+    Null,
+    True,
+    False,
+    For,
+    In,
+    Let,
+    If,
+    Colon,
+    Question,
+    Bang,
+    Comma(CommaKind),
+    Elipses,
+    Dot,
+    Bottom,
+    BinaryOperator(BinaryOperator),
+    Assign,
+    LBracket,
+    RBracket,
+    LBrace,
+    RBrace,
+    LParen,
+    RParen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +176,12 @@ enum Scope<'src> {
         options: InterpOptions,
         hashes: &'src str,
     },
+}
+
+impl<'src> Scope<'src> {
+    fn is_interpolation(&self) -> bool {
+        matches!(self, Self::Interpolation { .. })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -413,7 +471,7 @@ mod test {
         &PATH
     }
 
-    pub fn test_lexer<'src, 'bump, L: TokenLexer<'src, 'bump>>(
+    pub fn run_lexer<'src, 'bump, L: TokenLexer<'src, 'bump>>(
         src: &'src str,
         bump: &'bump Bump,
     ) -> Option<(usize, Vec<Token<'bump>>, Vec<Error<'bump>>)> {
