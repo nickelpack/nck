@@ -388,6 +388,10 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.scanner.offset == self.inner.val.len()
+    }
+
     #[inline(always)]
     fn push_scope(&mut self, scope: Scope<'src>) {
         self.scopes.push(scope)

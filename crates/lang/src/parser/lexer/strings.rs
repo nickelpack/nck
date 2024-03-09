@@ -1,3 +1,6 @@
+use std::ops::Range;
+
+use bitflags::Flags;
 use bumpalo::Bump;
 
 use super::{
@@ -12,13 +15,19 @@ pub trait StrType: Default {
     const FLAG: InterpOptions;
     fn matches(options: InterpOptions) -> bool;
     fn delimiter(options: InterpOptions) -> &'static str;
-    fn make_token(self, bump: &Bump, options: StringOptions) -> TokenKind<'_>;
+    fn make_token<'bump>(
+        &self,
+        range: Range<usize>,
+        bump: &'bump Bump,
+        options: StringOptions,
+    ) -> TokenKind<'bump>;
     fn push_slice(&mut self, val: &str);
     fn push_char(&mut self, val: char);
     #[inline(always)]
     fn read_escape(st: &mut StringLexeme<Self>, c: char, escape_start: LocationRef) -> bool {
         false
     }
+    fn len(&self) -> usize;
 }
 
 impl StrType for String {
@@ -39,8 +48,13 @@ impl StrType for String {
     }
 
     #[inline(always)]
-    fn make_token(self, bump: &Bump, options: StringOptions) -> TokenKind<'_> {
-        TokenKind::String(bump.alloc_str(&self), options)
+    fn make_token<'bump>(
+        &self,
+        range: Range<usize>,
+        bump: &'bump Bump,
+        options: StringOptions,
+    ) -> TokenKind<'bump> {
+        TokenKind::String(bump.alloc_str(&self[range]), options)
     }
 
     #[inline(always)]
@@ -51,6 +65,11 @@ impl StrType for String {
     #[inline(always)]
     fn push_char(&mut self, val: char) {
         self.push(val)
+    }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        String::len(self)
     }
 }
 
@@ -72,8 +91,13 @@ impl StrType for Vec<u8> {
     }
 
     #[inline(always)]
-    fn make_token(self, bump: &Bump, options: StringOptions) -> TokenKind<'_> {
-        TokenKind::Bytes(bump.alloc_slice_copy(&self), options)
+    fn make_token<'bump>(
+        &self,
+        range: Range<usize>,
+        bump: &'bump Bump,
+        options: StringOptions,
+    ) -> TokenKind<'bump> {
+        TokenKind::Bytes(bump.alloc_slice_copy(&self[range]), options)
     }
 
     #[inline(always)]
@@ -105,6 +129,11 @@ impl StrType for Vec<u8> {
 
         false
     }
+
+    #[inline(always)]
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
 }
 
 pub struct StringLexeme<'src, 'bump, T: StrType> {
@@ -114,17 +143,20 @@ pub struct StringLexeme<'src, 'bump, T: StrType> {
     next: Option<Scope<'src>>,
     errors: Vec<(LocationRef, ErrorKind)>,
     options: StringOptions,
+    multi_locs: Vec<(usize, LocationRef)>,
 }
 
 impl<'src, 'bump, T: StrType> TokenLexer<'src, 'bump> for StringLexeme<'src, 'bump, T> {
     fn lex(lexer: &Lexer<'src, 'bump>, mut scanner: Scanner<'src, 'bump>) -> Option<Self> {
+        let start = scanner.location();
         let mut result = Self {
-            start: scanner.location(),
+            start,
             scanner,
             result: T::default(),
             next: None,
             errors: Vec::new(),
             options: StringOptions::empty(),
+            multi_locs: vec![(0, start)],
         };
 
         let hashes = result
@@ -158,10 +190,41 @@ impl<'src, 'bump, T: StrType> TokenLexer<'src, 'bump> for StringLexeme<'src, 'bu
         !self.errors.is_empty()
     }
 
-    fn accept(self, lexer: &mut super::Lexer<'src, 'bump>) {
-        let tok = self.result.make_token(self.scanner.bump(), self.options);
+    fn accept(mut self, lexer: &mut super::Lexer<'src, 'bump>) {
         lexer.error(&self.scanner, self.errors.into_iter());
-        lexer.token(self.scanner, [(self.start, tok)].into_iter());
+
+        self.multi_locs
+            .push((self.result.len(), self.scanner.location()));
+
+        let last_index = self.multi_locs.len() - 2;
+        let bump = self.scanner.bump();
+        let toks = self
+            .multi_locs
+            .windows(2)
+            .enumerate()
+            .map(|(i, window)| {
+                (
+                    i == 0,
+                    i == last_index,
+                    window[0].0,
+                    window[0].1,
+                    window[1].0,
+                    window[1].1,
+                )
+            })
+            .map(|(first, last, prev_index, prev_loc, cur_index, cur_loc)| {
+                let mut options = self.options;
+                if !first {
+                    options.remove(StringOptions::OPEN);
+                }
+                if !last {
+                    options.remove(StringOptions::CLOSE);
+                };
+                let tok = self.result.make_token(prev_index..cur_index, bump, options);
+                (prev_loc.with_end_from(cur_loc), tok)
+            });
+
+        lexer.token(self.scanner, toks);
         if let Some(next) = self.next {
             lexer.push_scope(next)
         }
@@ -190,7 +253,13 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
                     '\r' => {
                         self.scanner.advance_char();
                     }
-                    '\n' if !allow_newline => {
+                    '\n' if allow_newline => {
+                        // Lines are split for simpler parsing
+                        self.scanner.advance_char();
+                        self.multi_locs
+                            .push((self.result.len(), self.scanner.location()));
+                    }
+                    '\n' => {
                         self.errors
                             .push((self.scanner.location(), ErrorKind::NewLineInString));
                     }
@@ -219,25 +288,36 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
         };
 
         match c {
-            'a' if self.scanner.advance_char().is_some() => self.result.push_char('\x07'),
-            'b' if self.scanner.advance_char().is_some() => self.result.push_char('\x08'),
-            'f' if self.scanner.advance_char().is_some() => self.result.push_char('\x0C'),
             'n' if self.scanner.advance_char().is_some() => self.result.push_char('\n'),
             'r' if self.scanner.advance_char().is_some() => self.result.push_char('\r'),
             't' if self.scanner.advance_char().is_some() => self.result.push_char('\t'),
-            'v' if self.scanner.advance_char().is_some() => self.result.push_char('\x0B'),
-            '/' if self.scanner.advance_char().is_some() => self.result.push_char('/'),
             '\\' if self.scanner.advance_char().is_some() => self.result.push_char('\\'),
+            '0' if self.scanner.advance_char().is_some() => self.result.push_char('\0'),
             _ if c == quote => {
                 self.scanner.advance_char();
                 self.result.push_char(quote);
             }
-            'u' | 'U' => {
-                self.scanner.advance_char();
-                let len = if (c == 'u') { 4 } else { 8 };
+            'u' if self.scanner.advance_char().is_some() => {
+                if !self.scanner.match_start("{") {
+                    self.errors.push((
+                        escape_start.with_end_from(self.scanner.location()),
+                        ErrorKind::BadEscapeSequence,
+                    ));
+                    return;
+                }
+
+                let mut index = None;
+                for (i, c) in self.scanner.remainder().char_indices() {
+                    match c {
+                        '0'..='9' | 'a'..='f' | 'A'..='F' => {}
+                        '}' => index = Some(i),
+                        _ => break,
+                    }
+                }
 
                 // Don't immediately advance in case an invalid sequence contains the string end
-                if let Some(val) = self.scanner.get_chars(len) {
+                if let Some(val) = index.and_then(|index| self.scanner.get_chars(index)) {
+                    self.scanner.advance_char(); // '}'
                     self.parse_unicode(escape_start, val)
                 } else {
                     self.errors.push((
@@ -285,44 +365,59 @@ mod test {
     test_lexer!(
         simple_string,
         CharStr,
-        r#""foo\a\b\f\n\r\t\v\/\\\uFEEE\U00010000""#,
-        39,
+        r#""foo\n\r\t\\\u{FEEE}\u{00010000}""#,
+        33,
         |bump| [(
-            0..39,
+            0..33,
             0,
             0,
             TokenKind::String(
-                bump.alloc_str("foo\x07\x08\x0C\n\r\t\x0B/\\\u{FEEE}\u{10000}"),
+                bump.alloc_str("foo\n\r\t\\\u{FEEE}\u{10000}"),
                 StringOptions::OPEN | StringOptions::CLOSE
             )
         )]
     );
 
+    #[rustfmt::skip]
     test_lexer!(
         simple_string_multi,
         CharStr,
         r#""""
-            foo\a\b\f\n
-            \r\t\v\/\\\uFEEE\U00010000
+            foo\n
+            \r\t\\\u{FEEE}\u{00010000}
             """"#,
-        82,
-        |bump| [(
-            0..82,
-            0,
-            0,
-            TokenKind::String(
-                bump.alloc_str(
-                    "\n            foo\u{7}\u{8}\u{c}\n\n            \r\t\u{b}/\\ﻮ𐀀\n            "
-                ),
-                StringOptions::OPEN | StringOptions::CLOSE
+        76,
+        |bump| [
+            (
+                0..4, 0, 0,
+                TokenKind::String(bump.alloc_str(""), StringOptions::OPEN)
+            ),
+            (
+                4..22, 1, 0,
+                TokenKind::String(
+                    bump.alloc_str("            foo\n"), StringOptions::empty(),
+                )
+            ),
+            (
+                22..61, 2,
+                0,
+                TokenKind::String(
+                    bump.alloc_str("            \r\t\\\u{FEEE}\u{10000}"), StringOptions::empty()
+                )
+            ),
+            (
+                61..76, 3, 0,
+                TokenKind::String(
+                    bump.alloc_str("            "), StringOptions::CLOSE
+                )
             )
-        )]
+        ]
     );
 
     test_lexer!(
         simple_bad_escape,
         CharStr,
-        r#""foo\z\uhell\UFEEEFEEE\ua"b"#,
+        r#""foo\z\uhell\uFEEEFEEE\ua"b"#,
         26,
         |bump| [(
             0..26,
@@ -346,16 +441,14 @@ mod test {
     test_lexer!(
         bytes_simple,
         BytesStr,
-        r#"'foo\a\b\f\n\r\t\v\/\\\uFEEE\U00010000\xDE\xae'"#,
-        47,
+        r#"'foo\n\r\t\\\u{FEEE}\u{00010000}\xDE\xae'"#,
+        41,
         |bump| [(
-            0..47,
+            0..41,
             0,
             0,
             TokenKind::Bytes(
-                bump.alloc_slice_copy(
-                    b"foo\x07\x08\x0C\n\r\t\x0B/\\\xEF\xBB\xAE\xF0\x90\x80\x80\xde\xae"
-                ),
+                bump.alloc_slice_copy(b"foo\n\r\t\\\xEF\xBB\xAE\xF0\x90\x80\x80\xde\xae"),
                 StringOptions::OPEN | StringOptions::CLOSE
             )
         )]
@@ -364,7 +457,7 @@ mod test {
     test_lexer!(
         bytes_bad_escape,
         BytesStr,
-        r#"'foo\z\uhell\UFEEEFEEE\ua\xe'b"#,
+        r#"'foo\z\uhell\uFEEEFEEE\ua\xe'b"#,
         29,
         |bump| [(
             0..29,

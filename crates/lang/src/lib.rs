@@ -2,6 +2,7 @@
 
 mod parser;
 
+#[cfg(test)]
 #[macro_export]
 macro_rules! test_lexer {
     ($name: ident, $type: ident, $src: literal, $end: literal, | $bump: ident |[$(($range: expr, $line: literal, $col: literal, $tok: expr)),+], | $err_bump: ident | [$(($err_range: expr, $err_line: literal, $err_col: literal, $err: expr)),+]) => {
@@ -18,11 +19,6 @@ macro_rules! test_lexer {
                     r.accept(&mut lexer);
                 })
                 .expect("successfully lexes");
-            ::pretty_assertions::assert_eq!(
-                lexer.scanner.offset,
-                $end,
-                "the lexer end position must match",
-            );
             ::pretty_assertions::assert_eq!(
                 lexer.tokens,
                 vec![$(
@@ -44,6 +40,11 @@ macro_rules! test_lexer {
                 ),+],
                 "the errors match",
             );
+            ::pretty_assertions::assert_eq!(
+                lexer.scanner.offset,
+                $end,
+                "the lexer end position must match",
+            );
         }
     };
 
@@ -62,11 +63,6 @@ macro_rules! test_lexer {
                 })
                 .expect("successfully lexes");
             ::pretty_assertions::assert_eq!(
-                lexer.scanner.offset,
-                $end,
-                "the lexer end position must match",
-            );
-            ::pretty_assertions::assert_eq!(
                 lexer.tokens,
                 vec![$(
                     $crate::parser::lexer::Token {
@@ -75,6 +71,11 @@ macro_rules! test_lexer {
                     }
                 ),+],
                 "the tokens match",
+            );
+            ::pretty_assertions::assert_eq!(
+                lexer.scanner.offset,
+                $end,
+                "the lexer end position must match",
             );
         }
     };
