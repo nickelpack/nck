@@ -23,10 +23,7 @@ pub trait StrType: Default {
     ) -> TokenKind<'bump>;
     fn push_slice(&mut self, val: &str);
     fn push_char(&mut self, val: char);
-    #[inline(always)]
-    fn read_escape(st: &mut StringLexeme<Self>, c: char, escape_start: LocationRef) -> bool {
-        false
-    }
+    fn push_byte(&mut self, val: u8) -> bool;
     fn len(&self) -> usize;
 }
 
@@ -65,6 +62,16 @@ impl StrType for String {
     #[inline(always)]
     fn push_char(&mut self, val: char) {
         self.push(val)
+    }
+
+    #[inline(always)]
+    fn push_byte(&mut self, val: u8) -> bool {
+        if let Some(c) = char::from_u32(val as u32) {
+            self.push_char(c);
+            true
+        } else {
+            false
+        }
     }
 
     #[inline(always)]
@@ -111,23 +118,10 @@ impl StrType for Vec<u8> {
         self.push_slice(val.encode_utf8(&mut buffer))
     }
 
-    fn read_escape(st: &mut StringLexeme<Self>, c: char, escape_start: LocationRef) -> bool {
-        if c != 'x' {
-            return false;
-        }
-
-        st.scanner.advance_char();
-
-        // Don't immediately advance in case an invalid sequence contains the string end
-        if let Some(chars) = st.scanner.get_chars(2) {
-            if let Ok(val) = u8::from_str_radix(chars, 16) {
-                st.result.push(val);
-                st.scanner.advance_by_bytes(chars.len());
-                return true;
-            }
-        }
-
-        false
+    #[inline(always)]
+    fn push_byte(&mut self, val: u8) -> bool {
+        self.push(val);
+        true
     }
 
     #[inline(always)]
@@ -159,10 +153,15 @@ impl<'src, 'bump, T: StrType> TokenLexer<'src, 'bump> for StringLexeme<'src, 'bu
             multi_locs: vec![(0, start)],
         };
 
-        let hashes = result
-            .scanner
-            .advance_while(|c| c == '#', None)
-            .unwrap_or("");
+        let hashes = if result.scanner.remainder().starts_with("r#") {
+            result.scanner.advance_char();
+            result
+                .scanner
+                .advance_while(|c| c == '#', None)
+                .unwrap_or("")
+        } else {
+            ""
+        };
 
         match (hashes, result.scanner.nth_char(0)?, lexer.peek_scope()) {
             ("", ')', Some(Scope::Interpolation { options, hashes }))
@@ -245,9 +244,9 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
             while let Some(c) = self.scanner.nth_char(0) {
                 let start = self.scanner.location();
                 match c {
-                    '\\' if self.scanner.advance_char().is_some()
-                        && self.scanner.match_start(hashes) =>
-                    {
+                    '\\' if self.scanner.remainder()[1..].starts_with(hashes) => {
+                        self.scanner.advance_char();
+                        self.scanner.advance_by_bytes(hashes.len());
                         if self.scanner.match_start("(") {
                             self.options |= StringOptions::ENTER;
                             self.next = Some(Scope::Interpolation { options, hashes });
@@ -302,6 +301,7 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
             't' if self.scanner.advance_char().is_some() => self.result.push_char('\t'),
             '\\' if self.scanner.advance_char().is_some() => self.result.push_char('\\'),
             '0' if self.scanner.advance_char().is_some() => self.result.push_char('\0'),
+            '#' if self.scanner.advance_char().is_some() => self.result.push_char('#'),
             _ if c == quote => {
                 self.scanner.advance_char();
                 self.result.push_char(quote);
@@ -335,7 +335,21 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
                     ))
                 }
             }
-            _ if T::read_escape(self, c, escape_start) => {}
+            'x' if self.scanner.advance_char().is_some() => {
+                // Don't immediately advance in case an invalid sequence contains the string end
+                if let Some(chars) = self.scanner.get_chars(2) {
+                    if let Ok(val) = u8::from_str_radix(chars, 16) {
+                        if self.result.push_byte(val) {
+                            self.scanner.advance_by_bytes(chars.len());
+                            return;
+                        }
+                    }
+                }
+                self.errors.push((
+                    escape_start.with_end_from(self.scanner.location()),
+                    ErrorKind::BadEscapeSequence,
+                ))
+            }
             _ => self.errors.push((
                 escape_start.with_end_from(self.scanner.location()),
                 ErrorKind::BadEscapeSequence,
@@ -374,14 +388,30 @@ mod test {
     test_lexer!(
         simple_string,
         CharStr,
-        r#""foo\n\r\t\\\u{FEEE}\u{00010000}""#,
-        33,
+        r#""foo\x05\n\r\t\\\u{FEEE}\u{00010000}""#,
+        37,
         |bump| [(
-            0..33,
+            0..37,
             0,
             0,
             TokenKind::String(
-                bump.alloc_str("foo\n\r\t\\\u{FEEE}\u{10000}"),
+                bump.alloc_str("foo\x05\n\r\t\\\u{FEEE}\u{10000}"),
+                StringOptions::OPEN | StringOptions::CLOSE
+            )
+        )]
+    );
+
+    test_lexer!(
+        verbatim_string,
+        CharStr,
+        r####"r###"foo\x05\#n\##r\###t\\\###u{FEEE}\u{00010000}\#####"###"####,
+        59,
+        |bump| [(
+            0..59,
+            0,
+            0,
+            TokenKind::String(
+                bump.alloc_str("foo\\x05\\#n\\##r\t\\\\\u{FEEE}\\u{00010000}##"),
                 StringOptions::OPEN | StringOptions::CLOSE
             )
         )]

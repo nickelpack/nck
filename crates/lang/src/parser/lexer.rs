@@ -303,14 +303,13 @@ impl<'src, 'bump> Scanner<'src, 'bump> {
         let remainder = self.remainder();
         let mut iter = remainder.char_indices();
 
-        while let Some((i, c)) = iter.next() {
+        for (i, c) in iter {
             if max == 0 || !f(c) {
                 if i == 0 {
                     return None;
                 }
 
-                let end_exclusive = iter.next().map(|(i, _)| i).unwrap_or(remainder.len());
-                return Some(self.apply_str(&remainder[..end_exclusive]));
+                return Some(self.apply_str(&remainder[..i]));
             }
             max -= 1;
         }
