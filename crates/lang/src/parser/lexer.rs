@@ -115,7 +115,9 @@ bitflags::bitflags! {
     pub struct StringOptions: u8 {
         const OPEN = 0b0000_0001;
         const CLOSE = 0b0000_0010;
-        const MULTI = 0b0000_0100;
+        const ENTER = 0b0000_0100; // Interpolation
+        const EXIT = 0b0000_1000; // Interpolation
+        const MULTI = 0b0001_0000;
     }
 }
 

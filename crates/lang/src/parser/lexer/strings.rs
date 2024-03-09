@@ -168,6 +168,10 @@ impl<'src, 'bump, T: StrType> TokenLexer<'src, 'bump> for StringLexeme<'src, 'bu
             ("", ')', Some(Scope::Interpolation { options, hashes }))
                 if T::matches(options) && result.scanner.advance_char().is_some() =>
             {
+                if options.contains(InterpOptions::MULTI) {
+                    result.options.insert(StringOptions::MULTI)
+                }
+                result.options.insert(StringOptions::EXIT);
                 result.lex_impl(hashes, options)
             }
             (hashes, '"' | '\'', _)
@@ -175,7 +179,7 @@ impl<'src, 'bump, T: StrType> TokenLexer<'src, 'bump> for StringLexeme<'src, 'bu
                     .scanner
                     .match_start(T::delimiter(InterpOptions::MULTI)) =>
             {
-                result.options |= StringOptions::OPEN;
+                result.options |= StringOptions::OPEN | StringOptions::MULTI;
                 result.lex_impl(hashes, InterpOptions::MULTI | T::FLAG)
             }
             (hashes, '"' | '\'', _) if result.scanner.advance_char().is_some() => {
@@ -215,10 +219,10 @@ impl<'src, 'bump, T: StrType> TokenLexer<'src, 'bump> for StringLexeme<'src, 'bu
             .map(|(first, last, prev_index, prev_loc, cur_index, cur_loc)| {
                 let mut options = self.options;
                 if !first {
-                    options.remove(StringOptions::OPEN);
+                    options.remove(StringOptions::OPEN | StringOptions::EXIT);
                 }
                 if !last {
-                    options.remove(StringOptions::CLOSE);
+                    options.remove(StringOptions::CLOSE | StringOptions::ENTER);
                 };
                 let tok = self.result.make_token(prev_index..cur_index, bump, options);
                 (prev_loc.with_end_from(cur_loc), tok)
@@ -239,9 +243,17 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
         let quote = delim.chars().next().unwrap();
         while let Some(c) = self.scanner.nth_char(0) {
             while let Some(c) = self.scanner.nth_char(0) {
+                let start = self.scanner.location();
                 match c {
-                    '\\' if self.scanner.match_start(hashes) => {
-                        self.take_string_escape(quote);
+                    '\\' if self.scanner.advance_char().is_some()
+                        && self.scanner.match_start(hashes) =>
+                    {
+                        if self.scanner.match_start("(") {
+                            self.options |= StringOptions::ENTER;
+                            self.next = Some(Scope::Interpolation { options, hashes });
+                            return Some(self);
+                        }
+                        self.take_string_escape(quote, start);
                     }
                     '\'' | '"' if self.scanner.match_start(delim) => {
                         if self.scanner.match_start(hashes) {
@@ -273,10 +285,7 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
         None
     }
 
-    fn take_string_escape(&mut self, quote: char) {
-        let escape_start = self.scanner.location();
-        self.scanner.advance_char();
-
+    fn take_string_escape(&mut self, quote: char, escape_start: LocationRef) {
         let c = if let Some(c) = self.scanner.nth_char(0) {
             c
         } else {
@@ -326,9 +335,6 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
                     ))
                 }
             }
-            '(' => {
-                todo!();
-            }
             _ if T::read_escape(self, c, escape_start) => {}
             _ => self.errors.push((
                 escape_start.with_end_from(self.scanner.location()),
@@ -353,7 +359,10 @@ impl<'src, 'bump, T: StrType> StringLexeme<'src, 'bump, T> {
 #[cfg(test)]
 mod test {
     use crate::{
-        parser::lexer::{ErrorKind, StringOptions, TokenKind},
+        parser::{
+            lexer::{ErrorKind, Lexer, StringOptions, Token, TokenKind, TokenLexer as _},
+            Location,
+        },
         test_lexer,
     };
 
@@ -390,25 +399,25 @@ mod test {
         |bump| [
             (
                 0..4, 0, 0,
-                TokenKind::String(bump.alloc_str(""), StringOptions::OPEN)
+                TokenKind::String(bump.alloc_str(""), StringOptions::OPEN | StringOptions::MULTI)
             ),
             (
                 4..22, 1, 0,
                 TokenKind::String(
-                    bump.alloc_str("            foo\n"), StringOptions::empty(),
+                    bump.alloc_str("            foo\n"), StringOptions::MULTI,
                 )
             ),
             (
                 22..61, 2,
                 0,
                 TokenKind::String(
-                    bump.alloc_str("            \r\t\\\u{FEEE}\u{10000}"), StringOptions::empty()
+                    bump.alloc_str("            \r\t\\\u{FEEE}\u{10000}"), StringOptions::MULTI
                 )
             ),
             (
                 61..76, 3, 0,
                 TokenKind::String(
-                    bump.alloc_str("            "), StringOptions::CLOSE
+                    bump.alloc_str("            "), StringOptions::CLOSE | StringOptions::MULTI
                 )
             )
         ]
@@ -435,6 +444,82 @@ mod test {
             (22..24, 0, 22, ErrorKind::BadEscapeSequence)
         ]
     );
+
+    #[test]
+    fn interp_string_multi() {
+        let bump = bumpalo::Bump::new();
+        let bump = &bump;
+        let path = std::path::PathBuf::from("test.cue");
+        let mut lexer = Lexer::new(
+            r#""""
+            foo\n\("test")
+            \r\t\\\u{FEEE}\u{00010000}
+            """"#,
+            &path,
+            bump,
+        );
+        for _ in 0..3 {
+            lexer
+                .lex::<CharStr>()
+                .map(|r| {
+                    r.accept(&mut lexer);
+                })
+                .expect("successfully lexes");
+        }
+        assert_eq!(
+            lexer.tokens,
+            vec![
+                Token {
+                    kind: (TokenKind::String(
+                        bump.alloc_str(""),
+                        StringOptions::OPEN | StringOptions::MULTI
+                    )),
+                    location: Location::new_in((0..4), 0, 0, &path, bump),
+                },
+                Token {
+                    kind: (TokenKind::String(
+                        bump.alloc_str("            foo\n"),
+                        StringOptions::ENTER | StringOptions::MULTI,
+                    )),
+                    location: Location::new_in((4..23), 1, 0, &path, bump),
+                },
+                Token {
+                    kind: (TokenKind::String(
+                        bump.alloc_str("test"),
+                        StringOptions::OPEN | StringOptions::CLOSE
+                    )),
+                    location: Location::new_in((23..29), 1, 19, &path, bump),
+                },
+                Token {
+                    kind: (TokenKind::String(
+                        bump.alloc_str(""),
+                        StringOptions::EXIT | StringOptions::MULTI
+                    )),
+                    location: Location::new_in((29..31), 1, 25, &path, bump),
+                },
+                Token {
+                    kind: (TokenKind::String(
+                        bump.alloc_str("            \r\t\\\u{FEEE}\u{10000}"),
+                        StringOptions::MULTI
+                    )),
+                    location: Location::new_in((31..70), 2, 0, &path, bump),
+                },
+                Token {
+                    kind: (TokenKind::String(
+                        bump.alloc_str("            "),
+                        StringOptions::CLOSE | StringOptions::MULTI
+                    )),
+                    location: Location::new_in((70..85), 3, 0, &path, bump),
+                }
+            ],
+            "the tokens match",
+        );
+
+        assert_eq!(
+            lexer.scanner.offset, 85,
+            "the lexer end position must match",
+        );
+    }
 
     test_lexer!(no_bytes, BytesStr, r#"123"#);
 
