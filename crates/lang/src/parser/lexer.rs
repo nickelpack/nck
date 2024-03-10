@@ -53,9 +53,7 @@ pub enum BinaryOperator {
     LogicalOr,
     Or,
     Inequal,
-    ApproxInequal,
     Equal,
-    ApproxEqual,
     LessEqual,
     Less,
     GreaterEqual,
@@ -79,9 +77,10 @@ pub enum TokenKind<'bump> {
     Colon,
     Question,
     Bang,
-    Comma(CommaKind),
+    Comma,
     Elipses,
     Dot,
+    Top,
     Bottom,
     BinaryOperator(BinaryOperator),
     Assign,
@@ -91,6 +90,8 @@ pub enum TokenKind<'bump> {
     RBrace,
     LParen,
     RParen,
+    Lambda,
+    Semicolon,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

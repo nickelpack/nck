@@ -23,6 +23,11 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Operator<'src, 'bump> {
                 scanner,
                 value: TokenKind::BinaryOperator(BinaryOperator::Sub),
             }),
+            '/' if scanner.match_start("/\\") => Some(Self {
+                start,
+                scanner,
+                value: TokenKind::Top,
+            }),
             '/' if scanner.advance_char().is_some() => Some(Self {
                 start,
                 scanner,
@@ -46,12 +51,12 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Operator<'src, 'bump> {
             ',' if scanner.advance_char().is_some() => Some(Self {
                 start,
                 scanner,
-                value: TokenKind::Comma(CommaKind::Explicit),
+                value: TokenKind::Comma,
             }),
-            '_' if scanner.match_start("_|_") => Some(Self {
+            ';' if scanner.advance_char().is_some() => Some(Self {
                 start,
                 scanner,
-                value: TokenKind::Bottom,
+                value: TokenKind::Semicolon,
             }),
             '.' if scanner.match_start("...") => Some(Self {
                 start,
@@ -88,11 +93,6 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Operator<'src, 'bump> {
                 scanner,
                 value: TokenKind::BinaryOperator(BinaryOperator::Inequal),
             }),
-            '!' if scanner.match_start("!~") => Some(Self {
-                start,
-                scanner,
-                value: TokenKind::BinaryOperator(BinaryOperator::ApproxInequal),
-            }),
             '!' if scanner.advance_char().is_some() => Some(Self {
                 start,
                 scanner,
@@ -102,11 +102,6 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Operator<'src, 'bump> {
                 start,
                 scanner,
                 value: TokenKind::BinaryOperator(BinaryOperator::Equal),
-            }),
-            '=' if scanner.match_start("=~") => Some(Self {
-                start,
-                scanner,
-                value: TokenKind::BinaryOperator(BinaryOperator::ApproxEqual),
             }),
             '=' if scanner.advance_char().is_some() => Some(Self {
                 start,
@@ -132,6 +127,31 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Operator<'src, 'bump> {
                 start,
                 scanner,
                 value: TokenKind::BinaryOperator(BinaryOperator::Greater),
+            }),
+            '\\' if scanner.match_start("\\/") => Some(Self {
+                start,
+                scanner,
+                value: TokenKind::Bottom,
+            }),
+            '\\' if scanner.advance_char().is_some() => Some(Self {
+                start,
+                scanner,
+                value: TokenKind::Lambda,
+            }),
+            '⊤' if scanner.match_start("⊤") => Some(Self {
+                start,
+                scanner,
+                value: TokenKind::Top,
+            }),
+            '⊥' if scanner.match_start("⊥") => Some(Self {
+                start,
+                scanner,
+                value: TokenKind::Bottom,
+            }),
+            'λ' if scanner.match_start("λ") => Some(Self {
+                start,
+                scanner,
+                value: TokenKind::Lambda,
             }),
             _ => None,
         }

@@ -7,11 +7,11 @@ pub struct Ident<'src, 'bump> {
 }
 
 fn is_start(c: char) -> bool {
-    tables::derived_property::XID_Start(c) || c == '$' || c == '_'
+    tables::derived_property::XID_Start(c) || c == '_'
 }
 
 fn is_continue(c: char) -> bool {
-    tables::derived_property::XID_Continue(c) || c == '$' || c == '_'
+    tables::derived_property::XID_Continue(c) || c == '_'
 }
 
 impl<'src, 'bump> TokenLexer<'src, 'bump> for Ident<'src, 'bump> {
