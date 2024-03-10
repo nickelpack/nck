@@ -150,10 +150,7 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Operator<'src, 'bump> {
 mod test {
     use bumpalo::Bump;
 
-    use crate::parser::lexer::{
-        test::{make_error, make_token},
-        ErrorKind, TokenKind,
-    };
+    use crate::parser::lexer::{ErrorKind, TokenKind};
 
     use pretty_assertions::assert_eq;
 

@@ -216,10 +216,7 @@ impl<'src, 'bump> Number<'src, 'bump> {
 #[cfg(test)]
 mod test {
     use crate::{
-        parser::lexer::{
-            test::{make_error, make_token},
-            ErrorKind, TokenKind,
-        },
+        parser::lexer::{ErrorKind, TokenKind},
         test_lexer,
     };
 

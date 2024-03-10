@@ -5,6 +5,7 @@
 use std::{
     cell::RefCell,
     fmt::Display,
+    io::Bytes,
     iter::Peekable,
     ops::{Deref, DerefMut, Range, RemAssign},
     path::{Path, PathBuf},
@@ -100,6 +101,7 @@ pub enum ErrorKind {
     InvalidNumberLiteral,
     NewLineInString,
     InvalidIdentifier,
+    Unexpected(char),
 }
 
 bitflags::bitflags! {
@@ -457,6 +459,54 @@ impl<'src, 'bump> Lexer<'src, 'bump> {
     }
 }
 
+pub fn lex<'bump>(
+    path: impl AsRef<Path>,
+    src: &str,
+    bump: &'bump Bump,
+) -> (Vec<Token<'bump>>, Vec<Error<'bump>>) {
+    let path = path.as_ref().to_path_buf();
+    let mut lexer = Lexer::new(src, &path, bump);
+
+    while let Some(c) = lexer.scanner.nth_char(0) {
+        if let Some(lexeme) = lexer.lex::<strings::BytesStr>() {
+            lexeme.accept(&mut lexer);
+        } else if let Some(lexeme) = lexer.lex::<strings::CharStr>() {
+            lexeme.accept(&mut lexer);
+        } else if let Some(lexeme) = lexer.lex::<strings::CharStr>() {
+            lexeme.accept(&mut lexer);
+        } else if let Some(lexeme) = lexer.lex::<operators::Operator>() {
+            lexeme.accept(&mut lexer);
+        } else if let Some(lexeme) = lexer.lex::<ident::Ident>() {
+            lexeme.accept(&mut lexer);
+        } else if let Some(lexeme) = lexer.lex::<surrounds::Surround>() {
+            lexeme.accept(&mut lexer);
+        } else if let Some(lexeme) = lexer.lex::<number::Number>() {
+            lexeme.accept(&mut lexer);
+        } else if c.is_whitespace() {
+            lexer.scanner.advance_while(char::is_whitespace, None);
+        } else if c == '#' {
+            lexer.scanner.advance_char();
+            lexer.scanner.advance_while(|c| c != '\n', None);
+            lexer.scanner.advance_char();
+        } else {
+            let start = lexer.scanner.offset;
+            let end = start + 1;
+            lexer.errors.push(Error {
+                kind: ErrorKind::Unexpected(c),
+                location: Location::new_in(
+                    start..end,
+                    lexer.scanner.line,
+                    lexer.scanner.col,
+                    lexer.scanner.inner.path,
+                    bump,
+                ),
+            });
+            lexer.scanner.advance_char();
+        }
+    }
+    (lexer.tokens, lexer.errors)
+}
+
 #[cfg(test)]
 mod test {
     use std::{ops::Range, path::PathBuf};
@@ -465,28 +515,17 @@ mod test {
     use pretty_assertions::assert_eq;
 
     use super::{
-        Error, ErrorKind, Inner, Lexer, Location, LocationRef, Scanner, Token, TokenKind,
+        lex, Error, ErrorKind, Inner, Lexer, Location, LocationRef, Scanner, Token, TokenKind,
         TokenLexer,
     };
 
     static PATH: once_cell::sync::Lazy<PathBuf> = once_cell::sync::Lazy::new(|| "test".into());
 
-    pub fn test_path() -> &'static PathBuf {
+    fn test_path() -> &'static PathBuf {
         &PATH
     }
 
-    pub fn run_lexer<'src, 'bump, L: TokenLexer<'src, 'bump>>(
-        src: &'src str,
-        bump: &'bump Bump,
-    ) -> Option<(usize, Vec<Token<'bump>>, Vec<Error<'bump>>)> {
-        let mut lexer = Lexer::new(src, test_path(), bump);
-        lexer.lex::<L>().map(move |r| {
-            r.accept(&mut lexer);
-            (lexer.scanner.offset, lexer.tokens, lexer.errors)
-        })
-    }
-
-    pub fn make_token<'bump>(
+    fn make_token<'bump>(
         bump: &'bump Bump,
         range: Range<usize>,
         line: usize,
@@ -499,16 +538,35 @@ mod test {
         }
     }
 
-    pub fn make_error<'bump>(
-        bump: &'bump Bump,
+    fn make_error(
+        bump: &Bump,
         range: Range<usize>,
         line: usize,
         col: usize,
         kind: ErrorKind,
-    ) -> Error<'bump> {
+    ) -> Error<'_> {
         Error {
             kind,
             location: Location::new_in(range, line, col, test_path(), bump),
         }
+    }
+
+    #[test]
+    fn lex_sample_1() {
+        let bump = &Bump::new();
+        let (tokens, errors) = lex(
+            test_path(),
+            r##"
+                let
+                foo = 123;
+                bar = \foo;
+                in {
+                    foo = bar;
+                }
+            "##,
+            bump,
+        );
+
+        assert_eq!(errors, vec![]);
     }
 }

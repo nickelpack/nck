@@ -67,6 +67,13 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Surround<'src, 'bump> {
     }
 
     fn accept(self, lexer: &mut Lexer<'src, 'bump>) {
+        match self.action {
+            ScopeAction::Push(v) => lexer.push_scope(v),
+            ScopeAction::Pop(_) => {
+                // TODO: We can validate here
+                lexer.pop_scope();
+            }
+        }
         lexer.token(self.scanner, [(self.start, self.value)].into_iter())
     }
 }
@@ -75,10 +82,7 @@ impl<'src, 'bump> TokenLexer<'src, 'bump> for Surround<'src, 'bump> {
 mod test {
     use bumpalo::Bump;
 
-    use crate::parser::lexer::{
-        test::{make_error, make_token},
-        ErrorKind, TokenKind,
-    };
+    use crate::parser::lexer::{ErrorKind, TokenKind};
 
     use pretty_assertions::assert_eq;
 
