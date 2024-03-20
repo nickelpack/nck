@@ -32,6 +32,7 @@ tower-service = "0.3"
 tower-http = { version="0.5", default-features = false, features = [ "trace" ]}
 hyper-util = "0.1"
 hyper = "1"
+uds = "0.4.2"
 
 petname = "1.1"
 

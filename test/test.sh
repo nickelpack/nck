@@ -16,6 +16,7 @@ req() {
 upload_file() {
   local file=$1
   local uploaded_file=$(req -X POST "${host}${formula_url}/file" --data-binary "@-" < "$file")
+  echo "$uploaded_file" >&2
   awk -v FS=': ' '/^etag/{print $2}' <<< "$uploaded_file" | sed -e 's#^"##' -e 's#"$##'
 }
 

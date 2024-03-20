@@ -6,8 +6,11 @@
 
 @bacon action='test' package='all':
 	#!/usr/bin/env sh
+	export RUST_BACKTRACE=1
 	if [ '{{package}}' == 'all' ]; then
 		bacon {{action}}
 	else
 		bacon {{action}} -- -p {{package}}
 	fi
+
+@daemon: (bacon 'run' 'nck-daemon')

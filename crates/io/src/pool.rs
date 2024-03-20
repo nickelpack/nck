@@ -225,7 +225,7 @@ impl<'a, T, const CAPACITY: usize> Drop for PoolState<'a, T, CAPACITY> {
 /// # Examples
 ///
 /// ```
-/// use nck_core::pool::Pool;
+/// use nck_io::pool::Pool;
 /// static BUFFER_POOL: Pool<16, Vec<u8>> = Pool::new(&|| Vec::new()).with_return_hook(&|mut v| {
 ///    if v.capacity() <= 4096 {
 ///        v.clear();

@@ -1,6 +1,5 @@
 use std::{
     hash::Hash,
-    io::ErrorKind,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::{atomic::AtomicUsize, Arc},

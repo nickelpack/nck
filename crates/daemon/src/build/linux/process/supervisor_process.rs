@@ -1,4 +1,8 @@
-use std::{fs::File, path::PathBuf};
+use std::{
+    fs::File,
+    os::{fd::OwnedFd, unix::net::UnixStream},
+    path::PathBuf,
+};
 
 use anyhow::Context;
 use nck_io::fs::TempDir;
@@ -14,17 +18,14 @@ use signal_hook::iterator::Signals;
 
 use crate::{
     build::linux::{
-        channel::{Channel, PendingChannel},
         fork,
         fs::{mount, unmount, MountType, SYS_NONE},
+        io::{EmptyFds, MessageChannel},
     },
     settings::StoreSettings,
 };
 
-use super::{
-    sandbox_process::{SandboxRequest, SandboxResponse},
-    set_id, ChildProcess,
-};
+use super::{set_id, ChildProcess};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SupervisorRequest {
@@ -40,14 +41,13 @@ pub enum SupervisorResponse {
 
 pub fn supervisor_process(
     config: StoreSettings,
-    supervisor_peer: PendingChannel<SupervisorResponse, SupervisorRequest>,
-    sandbox_peer: PendingChannel<SandboxResponse, SandboxRequest>,
+    supervisor_peer: &UnixStream,
+    sandbox_peer: OwnedFd,
     spec_path: PathBuf,
 ) -> anyhow::Result<()> {
-    let supervisor_peer = supervisor_peer.into_peer()?;
-    match fallible_supervisor_process(config, &supervisor_peer, sandbox_peer, spec_path) {
+    match fallible_supervisor_process(config, supervisor_peer, sandbox_peer, spec_path) {
         Ok(Some((child, _tmp))) => {
-            supervisor_peer.send(SupervisorResponse::Started)?;
+            supervisor_peer.write_message(SupervisorResponse::Started, EmptyFds)?;
             wait(child).context("while waiting for child to exit")?;
         }
         Ok(None) => {
@@ -55,7 +55,7 @@ pub fn supervisor_process(
         }
         Err(error) => {
             tracing::error!(?error, "supervisor failed");
-            supervisor_peer.send(SupervisorResponse::Failed)?;
+            supervisor_peer.write_message(SupervisorResponse::Failed, EmptyFds)?;
             Err(error)?;
         }
     }
@@ -64,15 +64,15 @@ pub fn supervisor_process(
 
 fn fallible_supervisor_process(
     config: StoreSettings,
-    supervisor_peer: &Channel<SupervisorResponse, SupervisorRequest>,
-    sandbox_peer: PendingChannel<SandboxResponse, SandboxRequest>,
+    supervisor_peer: &UnixStream,
+    sandbox_peer: OwnedFd,
     spec_path: PathBuf,
 ) -> anyhow::Result<Option<(ChildProcess, Unmount)>> {
     if let Err(error) = prctl::set_name("nck-supervisor") {
         tracing::warn!(?error, "failed to set supervisor name");
     }
 
-    match supervisor_peer.recv()? {
+    match supervisor_peer.read_message(&mut EmptyFds)? {
         SupervisorRequest::UserMapped => {}
         SupervisorRequest::Exit => {
             return Ok(None);
@@ -105,7 +105,6 @@ fn fallible_supervisor_process(
 
     let tmp = Unmount(tmp, f);
     let cb = {
-        let sandbox_peer = sandbox_peer.clone();
         let spec_path = spec_path.clone();
         let sandbox_path = tmp.0.as_path().to_path_buf();
         let config = config.clone();
@@ -113,7 +112,7 @@ fn fallible_supervisor_process(
             super::sandbox_process::sandbox_process(
                 config.clone(),
                 sandbox_path.clone(),
-                sandbox_peer.clone(),
+                sandbox_peer.try_clone().unwrap(),
                 spec_path.clone(),
             )
         })

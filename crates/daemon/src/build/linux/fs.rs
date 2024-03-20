@@ -20,7 +20,7 @@ const PROC: &[u8] = b"proc";
 const SYSFS: &[u8] = b"sysfs";
 const TMPFS: &[u8] = b"tmpfs";
 const DEVPTS: &[u8] = b"devpts";
-const OVERLAY: &[u8] = b"overlay";
+const OVERLAY: &[u8] = b"fuse-overlayfs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountType {

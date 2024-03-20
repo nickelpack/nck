@@ -1,9 +1,11 @@
 use std::{
     fs::{copy, set_permissions, Permissions},
-    os::unix::{fs::symlink, prelude::PermissionsExt},
+    os::{
+        fd::OwnedFd,
+        unix::{fs::symlink, net::UnixStream, prelude::PermissionsExt},
+    },
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
 };
 
 use nck_spec::{LinkFlags, Spec};
@@ -11,10 +13,7 @@ use nix::mount::MsFlags;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    build::linux::{
-        channel::PendingChannel,
-        fs::{bind, mount, overlay, pivot, MountType, SYS_NONE},
-    },
+    build::linux::fs::{bind, mount, overlay, pivot, MountType, SYS_NONE},
     settings::StoreSettings,
 };
 
@@ -37,10 +36,11 @@ struct Paths {
 pub fn sandbox_process(
     config: StoreSettings,
     sandbox_path: PathBuf,
-    sandbox_peer: PendingChannel<SandboxResponse, SandboxRequest>,
+    sandbox_peer: OwnedFd,
     spec_path: PathBuf,
 ) -> anyhow::Result<()> {
-    let sandbox_peer = sandbox_peer.into_peer()?;
+    let sandbox_peer: UnixStream = sandbox_peer.into();
+
     let spec = std::fs::read_to_string(spec_path.as_path())?;
     let spec = toml::from_str::<Spec>(&spec)?;
 

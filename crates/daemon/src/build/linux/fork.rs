@@ -284,9 +284,13 @@ fn clone_fallback<R: IntoExitCode + std::fmt::Debug>(
 
 #[cfg(all(test, not(tarpaulin)))]
 mod test {
+    use std::{
+        io::{Read, Write},
+        os::unix::net::UnixStream,
+    };
+
     use super::*;
-    use crate::build::linux::channel::unix_pair;
-    use anyhow::{bail, Context, Result};
+    use anyhow::{bail, Result};
     use nix::{
         sys::wait::{waitpid, WaitStatus},
         unistd::ForkResult,
@@ -331,19 +335,14 @@ mod test {
 
         // We need to use a channel so that the forked process can pass the pid
         // of the sibling process to the testing process.
-        let (child_channel, server_channel) = &mut unix_pair::<i32, i32>()?;
+        let (mut child_socket, mut server_socket) = UnixStream::pair()?;
 
         match unsafe { nix::unistd::fork() }? {
             ForkResult::Parent { child } => {
-                let channel = server_channel
-                    .clone()
-                    .into_peer()
-                    .expect("the receiver can be realized");
-                let sibling_process_pid =
-                    Pid::from_raw(channel.recv().with_context(|| {
-                        "failed to receive the sibling pid from forked process"
-                    })?);
-                drop(channel);
+                let mut sibling_process_pid = [0u8; std::mem::size_of::<i32>()];
+                server_socket.read_exact(&mut sibling_process_pid)?;
+                let sibling_process_pid = i32::from_ne_bytes(sibling_process_pid);
+                let sibling_process_pid = Pid::from_raw(sibling_process_pid);
                 match waitpid(sibling_process_pid, None).expect("wait pid failed.") {
                     WaitStatus::Exited(p, status) => {
                         assert_eq!(sibling_process_pid, p);
@@ -363,10 +362,9 @@ mod test {
             ForkResult::Child => {
                 // Inside the forked process. We call `container_clone` and pass
                 // the pid to the parent process.
-                let channel = child_channel.clone().into_peer()?;
                 let pid = clone(Box::new(|| 0), CloneFlags::CLONE_PARENT)?;
-                channel.send(pid.as_raw())?;
-                drop(channel);
+                let mut pid = pid.as_raw().to_ne_bytes();
+                child_socket.write_all(&mut pid)?;
                 std::process::exit(0);
             }
         };

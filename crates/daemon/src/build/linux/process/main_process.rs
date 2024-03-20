@@ -1,20 +1,23 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    os::{fd::OwnedFd, unix::net::UnixStream},
+    path::Path,
+    sync::Arc,
+};
 
 use nix::sched::CloneFlags;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::{io::unix::AsyncFd, sync::Mutex};
 
 use crate::{
     build::linux::{
-        channel::{self, AsyncChannel, ChannelError, PendingChannel, PendingChannelError},
         fork,
+        io::{AsyncMessageChannel as _, EmptyFds},
         user_ns::{LinuxIdMapping, UserNamespaceConfig, UserNamespaceError},
     },
     settings::{DaemonSettings, StoreSettings},
 };
 
 use super::{
-    sandbox_process::{SandboxRequest, SandboxResponse},
     zygote_process::{ZygoteRequest, ZygoteResponse},
     ChildProcess,
 };
@@ -23,35 +26,38 @@ pub fn main_process(
     store_settings: StoreSettings,
     daemon_settings: DaemonSettings,
 ) -> anyhow::Result<PendingController> {
-    let (parent, child) = channel::unix_pair()?;
-    let cb = Box::new(move || {
-        super::zygote_process::zygote_process(store_settings.clone(), child.clone())
+    let (parent, child) = UnixStream::pair()?;
+    let cb = Box::new(move || match child.try_clone() {
+        Ok(child) => super::zygote_process::zygote_process(store_settings.clone(), child),
+        Err(e) => Err(anyhow::anyhow!("failed to clone child socket {:?}", e)),
     });
+    tracing::debug!("starting zygote");
     let zygote: ChildProcess = fork::clone(cb, CloneFlags::empty())?.into();
 
     Ok(PendingController {
         daemon_settings,
         _zygote: zygote,
-        channel: parent,
+        socket: parent,
     })
 }
 
 /// A controller that has not been activated.
 ///
-/// This primarily exists to avoid interacting with tokio prior to creating the zygote. This is to keep the address
-/// space relatively small so that zygote clones are fast.
+/// This primarily exists to avoid interacting with tokio prior to creating the zygote. Forking/cloning with threads
+/// is UB.
 #[derive(Debug)]
 pub struct PendingController {
     _zygote: ChildProcess,
-    channel: PendingChannel<ZygoteRequest, ZygoteResponse>,
+    socket: UnixStream,
     daemon_settings: DaemonSettings,
 }
 
 impl PendingController {
     pub async fn into_controller(self) -> anyhow::Result<Controller> {
+        self.socket.set_nonblocking(true)?;
         Ok(Controller(Arc::new(Mutex::new(ControllerState {
             _zygote: self._zygote,
-            channel: self.channel.into_peer_async().await?,
+            socket: AsyncFd::new(self.socket)?,
             daemon_settings: self.daemon_settings,
         }))))
     }
@@ -60,7 +66,7 @@ impl PendingController {
 #[derive(Debug)]
 struct ControllerState {
     _zygote: ChildProcess,
-    channel: AsyncChannel<ZygoteRequest, ZygoteResponse>,
+    socket: AsyncFd<UnixStream>,
     daemon_settings: DaemonSettings,
 }
 
@@ -73,10 +79,6 @@ pub enum SpawnError {
     IO(#[from] std::io::Error),
     #[error(transparent)]
     UserNamespace(#[from] UserNamespaceError),
-    #[error(transparent)]
-    PendingChannel(#[from] PendingChannelError),
-    #[error(transparent)]
-    Channel(#[from] ChannelError),
     #[error("spawn failed in child process")]
     SpawnFailed,
 }
@@ -101,20 +103,22 @@ impl Controller {
                 1,
             ));
 
-        let (sandbox_peer, local_sandbox_peer) = channel::unix_pair()?;
-        let sandbox_channel = local_sandbox_peer.into_peer_async().await?;
+        let (sandbox_peer, local_sandbox_peer) = UnixStream::pair()?;
+        let sandbox_peer = Some(OwnedFd::from(sandbox_peer));
 
-        s.channel
-            .send(ZygoteRequest::Spawn {
-                user_namespace_config,
-                spec_path: path.as_ref().to_path_buf(),
-                sandbox_peer,
-            })
+        s.socket
+            .write_message(
+                ZygoteRequest::Spawn {
+                    user_namespace_config,
+                    spec_path: path.as_ref().to_path_buf(),
+                },
+                sandbox_peer.iter(),
+            )
             .await?;
 
-        match s.channel.recv().await? {
+        match s.socket.read_message(&mut EmptyFds).await? {
             ZygoteResponse::SpawnSuccess => Ok(Sandbox {
-                channel: sandbox_channel,
+                channel: local_sandbox_peer,
             }),
             ZygoteResponse::SpawnFailure => Err(SpawnError::SpawnFailed),
         }
@@ -123,5 +127,5 @@ impl Controller {
 
 #[derive(Debug)]
 pub struct Sandbox {
-    channel: AsyncChannel<SandboxRequest, SandboxResponse>,
+    channel: UnixStream,
 }
