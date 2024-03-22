@@ -136,9 +136,9 @@ impl AsyncMessageChannel for AsyncFd<UnixStream> {
 
         let mut buf = BUFFER_POOL.take();
         buf.resize(len, 0u8);
-        read_impl(self, &mut buf, fds).await?;
+        read_impl(self, &mut buf[..len], fds).await?;
 
-        postcard::from_bytes(&buf[..]).map_err(|_| Error::from(ErrorKind::InvalidData))
+        postcard::from_bytes(&buf[..len]).map_err(|_| Error::from(ErrorKind::InvalidData))
     }
 }
 
@@ -217,9 +217,9 @@ impl MessageChannel for UnixStream {
 
         let mut buf = BUFFER_POOL.take();
         buf.resize(len, 0u8);
-        read_impl(self, &mut buf, fds)?;
+        read_impl(self, &mut buf[..len], fds)?;
 
-        postcard::from_bytes(&buf[..]).map_err(|_| Error::from(ErrorKind::InvalidData))
+        postcard::from_bytes(&buf[..len]).map_err(|_| Error::from(ErrorKind::InvalidData))
     }
 }
 

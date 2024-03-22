@@ -2,15 +2,20 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::Path,
 };
 
 use nix::{
     fcntl::{open, OFlag},
+    libc::{
+        syscall, AT_EMPTY_PATH, AT_RECURSIVE, EBADF, MOVE_MOUNT_F_EMPTY_PATH, OPEN_TREE_CLOEXEC,
+        OPEN_TREE_CLONE,
+    },
     mount::{MntFlags, MsFlags},
     sys::stat::{makedev, Mode, SFlag},
     unistd::fchdir,
+    NixPath,
 };
 
 pub const SYS_NONE: Option<&Path> = None::<&Path>;
@@ -20,7 +25,8 @@ const PROC: &[u8] = b"proc";
 const SYSFS: &[u8] = b"sysfs";
 const TMPFS: &[u8] = b"tmpfs";
 const DEVPTS: &[u8] = b"devpts";
-const OVERLAY: &[u8] = b"fuse-overlayfs";
+const OVERLAY: &[u8] = b"overlay";
+const FUSE: &[u8] = b"fuse";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MountType {
@@ -30,6 +36,7 @@ pub enum MountType {
     TmpFs,
     DevPts,
     Overlay,
+    Fuse,
 }
 
 impl AsRef<OsStr> for MountType {
@@ -42,6 +49,7 @@ impl AsRef<OsStr> for MountType {
             MountType::TmpFs => TMPFS,
             MountType::DevPts => DEVPTS,
             MountType::Overlay => OVERLAY,
+            MountType::Fuse => FUSE,
         };
         unsafe { OsStr::from_encoded_bytes_unchecked(cstr) }
     }
@@ -148,37 +156,57 @@ pub fn bind(
     src: impl AsRef<Path>,
     dest: impl AsRef<Path>,
     additional_flags: Option<MsFlags>,
+    ns_fd: Option<RawFd>,
 ) -> nix::Result<()> {
     let src = src.as_ref();
     let dest = dest.as_ref();
 
     tracing::trace!(?src, ?dest, "creating bind mount");
 
-    if let Some(parent) = dest.parent() {
-        tracing::trace!(?parent, "creating parent directory");
-        std::fs::create_dir_all(parent)
-            .map_err(|e| nix::Error::from_i32(e.raw_os_error().unwrap_or(0)))?;
-    }
+    if let Some(ns_fd) = ns_fd {
+        let fd_tree = open_tree(None, src, true)?;
+        let attr = MountAttr {
+            attr_set: 1048576,
+            attr_clr: 0,
+            propagation: 0,
+            userns_fd: ns_fd as u64,
+        };
+        mount_setattr(
+            Some(fd_tree),
+            "",
+            (AT_RECURSIVE | AT_EMPTY_PATH) as u32,
+            &attr,
+        )?;
+        move_mount(Some(fd_tree), "", None, dest)?;
 
-    if src.is_dir() {
-        if !dest.is_dir() {
-            tracing::trace!(?dest, "creating target directory");
-            std::fs::create_dir(dest)
+        Ok(())
+    } else {
+        if let Some(parent) = dest.parent() {
+            tracing::trace!(?parent, "creating parent directory");
+            std::fs::create_dir_all(parent)
                 .map_err(|e| nix::Error::from_i32(e.raw_os_error().unwrap_or(0)))?;
         }
-    } else if !dest.is_file() {
-        tracing::trace!(?dest, "creating target file");
-        std::fs::write(dest, "")
-            .map_err(|e| nix::Error::from_i32(e.raw_os_error().unwrap_or(0)))?;
-    }
 
-    mount(
-        Some(src),
-        dest,
-        Some(MountType::Bind),
-        MsFlags::MS_REC | MsFlags::MS_BIND | additional_flags.unwrap_or_else(MsFlags::empty),
-        SYS_NONE,
-    )
+        if src.is_dir() {
+            if !dest.is_dir() {
+                tracing::trace!(?dest, "creating target directory");
+                std::fs::create_dir(dest)
+                    .map_err(|e| nix::Error::from_i32(e.raw_os_error().unwrap_or(0)))?;
+            }
+        } else if !dest.is_file() {
+            tracing::trace!(?dest, "creating target file");
+            std::fs::write(dest, "")
+                .map_err(|e| nix::Error::from_i32(e.raw_os_error().unwrap_or(0)))?;
+        }
+
+        mount(
+            Some(src),
+            dest,
+            Some(MountType::Bind),
+            MsFlags::MS_REC | MsFlags::MS_BIND | additional_flags.unwrap_or_else(MsFlags::empty),
+            SYS_NONE,
+        )
+    }
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(new_root = ?new_root.as_ref()))]
@@ -225,4 +253,103 @@ pub fn pivot(new_root: impl AsRef<Path>) -> nix::Result<()> {
     tracing::trace!("changing directory to the new root");
     fchdir(newroot.as_raw_fd())?;
     Ok(())
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// A structure used as te third argument of mount_setattr(2).
+pub struct MountAttr {
+    /// Mount properties to set.
+    pub attr_set: u64,
+
+    /// Mount properties to clear.
+    pub attr_clr: u64,
+
+    /// Mount propagation type.
+    pub propagation: u64,
+
+    /// User namespace file descriptor.
+    pub userns_fd: u64,
+}
+
+fn mount_setattr<P1>(
+    dir: Option<RawFd>,
+    path: &P1,
+    flags: u32,
+    mount_attr: &MountAttr,
+) -> nix::Result<()>
+where
+    P1: ?Sized + NixPath,
+{
+    path.with_nix_path(|path| {
+        let dirfd = dir.unwrap_or(-EBADF);
+        let size = std::mem::size_of_val(mount_attr);
+        match unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_mount_setattr,
+                dirfd,
+                path.as_ptr(),
+                flags,
+                mount_attr as *const MountAttr,
+                size,
+            )
+        } {
+            0 => Ok(()),
+            -1 => Err(nix::Error::last()),
+            _ => Err(nix::Error::UnknownErrno),
+        }?;
+        Ok(())
+    })?
+}
+
+fn open_tree<P1>(dir: Option<RawFd>, path: &P1, recursive: bool) -> nix::Result<RawFd>
+where
+    P1: ?Sized + NixPath,
+{
+    path.with_nix_path(|path| {
+        let dirfd = dir.unwrap_or(-EBADF);
+        let mut flags = (OPEN_TREE_CLOEXEC | OPEN_TREE_CLONE) as i32 | AT_EMPTY_PATH;
+        if recursive {
+            flags |= AT_RECURSIVE;
+        }
+
+        match unsafe { nix::libc::syscall(nix::libc::SYS_open_tree, dirfd, path.as_ptr(), flags) } {
+            -1 => Err(nix::Error::last()),
+            r => Ok(r as i32),
+        }
+    })?
+}
+
+fn move_mount<P1, P2>(
+    source_dir: Option<RawFd>,
+    source: &P1,
+    dest_dir: Option<RawFd>,
+    dest: &P2,
+) -> nix::Result<()>
+where
+    P1: ?Sized + NixPath,
+    P2: ?Sized + NixPath,
+{
+    source.with_nix_path(|source| {
+        dest.with_nix_path(|dest| {
+            let source_dir = source_dir.unwrap_or(-EBADF);
+            let dest_dir = dest_dir.unwrap_or(-EBADF);
+
+            match unsafe {
+                nix::libc::syscall(
+                    nix::libc::SYS_move_mount,
+                    source_dir,
+                    source.as_ptr(),
+                    dest_dir,
+                    dest.as_ptr(),
+                    MOVE_MOUNT_F_EMPTY_PATH,
+                )
+            } {
+                0 => Ok(()),
+                -1 => Err(nix::Error::last()),
+                _ => Err(nix::Error::UnknownErrno),
+            }?;
+            Ok(())
+        })
+    })??
 }

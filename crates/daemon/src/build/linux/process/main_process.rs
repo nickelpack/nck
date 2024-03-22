@@ -1,6 +1,9 @@
 use std::{
-    os::{fd::OwnedFd, unix::net::UnixStream},
-    path::Path,
+    collections::VecDeque,
+    os::{
+        fd::{AsRawFd, OwnedFd},
+        unix::net::UnixStream,
+    },
     sync::Arc,
 };
 
@@ -11,6 +14,7 @@ use tokio::{io::unix::AsyncFd, sync::Mutex};
 use crate::{
     build::linux::{
         fork,
+        fs::bind,
         io::{AsyncMessageChannel as _, EmptyFds},
         user_ns::{LinuxIdMapping, UserNamespaceConfig, UserNamespaceError},
     },
@@ -18,7 +22,8 @@ use crate::{
 };
 
 use super::{
-    zygote_process::{ZygoteRequest, ZygoteResponse},
+    sandbox_process::SandboxResponse,
+    zygote_process::{InitialRequest, SpawnError as ZygoteSpawnError},
     ChildProcess,
 };
 
@@ -80,11 +85,11 @@ pub enum SpawnError {
     #[error(transparent)]
     UserNamespace(#[from] UserNamespaceError),
     #[error("spawn failed in child process")]
-    SpawnFailed,
+    SpawnFailed(ZygoteSpawnError),
 }
 
 impl Controller {
-    pub async fn spawn_async(&self, path: impl AsRef<Path>) -> Result<Sandbox, SpawnError> {
+    pub async fn spawn_async(&self) -> Result<Sandbox, SpawnError> {
         let s = self.0.clone().lock_owned().await;
 
         let mut user_namespace_config = UserNamespaceConfig::new()?;
@@ -105,27 +110,45 @@ impl Controller {
 
         let (sandbox_peer, local_sandbox_peer) = UnixStream::pair()?;
         let sandbox_peer = Some(OwnedFd::from(sandbox_peer));
+        local_sandbox_peer.set_nonblocking(true)?;
+        let local_sandbox_peer = AsyncFd::new(local_sandbox_peer)?;
 
         s.socket
             .write_message(
-                ZygoteRequest::Spawn {
+                InitialRequest::Spawn {
                     user_namespace_config,
-                    spec_path: path.as_ref().to_path_buf(),
                 },
                 sandbox_peer.iter(),
             )
             .await?;
 
+        let mut fds = VecDeque::with_capacity(1);
         match s.socket.read_message(&mut EmptyFds).await? {
-            ZygoteResponse::SpawnSuccess => Ok(Sandbox {
-                channel: local_sandbox_peer,
-            }),
-            ZygoteResponse::SpawnFailure => Err(SpawnError::SpawnFailed),
+            Ok(()) => {
+                tracing::trace!("waiting for message");
+                match local_sandbox_peer.read_message(&mut fds).await? {
+                    SandboxResponse::EstablishStore(root) => {
+                        let fd = fds.pop_front().unwrap();
+                        tracing::trace!(?fd, ?root, "got message");
+                        bind(
+                            "/var/nck/store",
+                            root.join("var/nck/store"),
+                            None,
+                            Some(fd.as_raw_fd()),
+                        )
+                        .unwrap();
+                    }
+                }
+                Ok(Sandbox {
+                    channel: local_sandbox_peer,
+                })
+            }
+            Err(e) => Err(SpawnError::SpawnFailed(e)),
         }
     }
 }
 
 #[derive(Debug)]
 pub struct Sandbox {
-    channel: UnixStream,
+    channel: AsyncFd<UnixStream>,
 }

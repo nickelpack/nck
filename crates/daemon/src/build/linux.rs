@@ -2,6 +2,8 @@ mod fork;
 mod fs;
 mod io;
 mod process;
+mod rootfs;
+mod shiftfs;
 mod user_ns;
 
 use crate::settings::Settings;
