@@ -1,10 +1,19 @@
 use std::{
     io::{ErrorKind, Result},
     ops::Deref,
+    os::fd::{FromRawFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     sync::atomic::AtomicUsize,
 };
 
+use nix::{
+    errno::Errno,
+    libc::{
+        syscall, SYS_open_tree, AT_EMPTY_PATH, AT_RECURSIVE, EBADF, OPEN_TREE_CLOEXEC,
+        OPEN_TREE_CLONE, O_CLOEXEC,
+    },
+    NixPath,
+};
 use rand::seq::SliceRandom;
 use tokio::fs::{File, OpenOptions};
 
@@ -293,4 +302,19 @@ async fn move_replace_fallback(from: &Path, to: &Path) -> Result<()> {
             Err(e)
         }
     }
+}
+
+pub fn clone_mount<P: ?Sized + NixPath>(dfd: Option<RawFd>, path: &P) -> nix::Result<OwnedFd> {
+    let dfd = dfd.unwrap_or(-EBADF);
+    let fd = path.with_nix_path(|path| unsafe {
+        syscall(
+            SYS_open_tree,
+            dfd,
+            path.as_ptr(),
+            OPEN_TREE_CLOEXEC | OPEN_TREE_CLONE | (AT_RECURSIVE | AT_EMPTY_PATH) as u32,
+        )
+    })?;
+
+    let fd = Errno::result(fd as i32)?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }

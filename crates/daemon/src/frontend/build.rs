@@ -11,7 +11,6 @@ use derive_more::{Deref, DerefMut};
 use futures::StreamExt;
 use hyper::{header, HeaderMap, StatusCode};
 use nck_hashing::{StableHashExt, SupportedHash, SupportedHasher};
-use nck_spec::Spec;
 use tokio::{
     io::AsyncWriteExt,
     sync::{Mutex, OwnedMappedMutexGuard, OwnedMutexGuard},
@@ -75,20 +74,13 @@ pub fn create_routes(frontend_state: FrontendState) -> Router {
 }
 
 async fn create_build(State(state): State<BuildsState>) -> Result<Response, AppError> {
-    let name = loop {
-        let pet = petname::petname(3, "-");
-        if let Entry::Vacant(vacant) = state.pending_builds.entry(pet) {
-            let key = vacant.key().clone();
-            vacant.insert(PendingBuild(Arc::new(Mutex::new(Some(
-                PendingBuildState {
-                    locks: HashSet::new(),
-                },
-            )))));
-            break key;
-        }
-    };
-
-    tracing::debug!(?name, "build created");
+    let store_entry = state
+        .store
+        .create_temporary_entry()
+        .await
+        .reason("creating working directory")?;
+    let name = store_entry.name();
+    tracing::debug!(name, "build created");
 
     let response = Response::builder()
         .status(StatusCode::CREATED)

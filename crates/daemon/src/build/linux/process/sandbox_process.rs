@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub enum SandboxRequest {}
 
 #[tracing::instrument(level = "trace", skip_all)]
-pub fn sandbox_process(sandbox_peer: OwnedFd) -> anyhow::Result<()> {
+pub fn sandbox_process(sandbox_peer: OwnedFd, tmpfs: OwnedFd) -> anyhow::Result<()> {
     let sandbox_peer: UnixStream = sandbox_peer.into();
 
     Ok(())

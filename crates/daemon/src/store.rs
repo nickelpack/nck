@@ -9,13 +9,28 @@ use dashmap::{mapref::entry::Entry, DashMap};
 use derive_more::{Deref, DerefMut};
 use nck_hashing::{SupportedHash, SupportedHasher};
 use nck_io::fs::TempFile;
-use nck_spec::Spec;
 use tokio::{fs::File, io::AsyncWriteExt, task::JoinSet};
 
 use crate::{
     build::linux::{Controller, Sandbox},
     settings::StoreSettings,
 };
+
+#[derive(Debug)]
+pub struct TempStoreEntry {
+    name: String,
+    path: PathBuf,
+}
+
+impl TempStoreEntry {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
 #[derive(Debug)]
 struct StorePaths {
@@ -29,13 +44,12 @@ impl StorePaths {
         let result = Self {
             store: settings.path.clone(),
             files: settings.path.join("files"),
-            temp: settings.temp.clone(),
+            temp: settings.path.join("temp"),
         };
 
-        let mut js = JoinSet::new();
-        js.spawn(tokio::fs::create_dir_all(result.store.clone()));
-        js.spawn(tokio::fs::create_dir_all(result.files.clone()));
-        js.spawn(tokio::fs::create_dir_all(result.temp.clone()));
+        tokio::fs::create_dir_all(result.store.clone()).await?;
+        tokio::fs::create_dir_all(result.files.clone()).await?;
+        tokio::fs::create_dir_all(result.temp.clone()).await?;
 
         while let Some(awaited) = js.join_next().await {
             match awaited {
@@ -118,7 +132,8 @@ impl Store {
         PendingFile::new(self.0.clone()).await
     }
 
-    pub async fn start(&self, spec: Spec) -> anyhow::Result<()> {
+    pub async fn start(&self, spec: AsRef<Path>) -> anyhow::Result<()> {
+        let spec = spec.as_ref();
         let output_path = spec
             .paths(&self.paths.store, SupportedHasher::blake3())
             .spec();
@@ -141,7 +156,7 @@ impl Store {
             locks.push(dec);
         }
 
-        let sandbox = self.controller.spawn_async(output_path.as_path()).await?;
+        let sandbox = self.controller.spawn_async().await?;
         let build = Build { sandbox, locks };
 
         let id = self
@@ -149,6 +164,19 @@ impl Store {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.builds.insert(id, build);
         Ok(())
+    }
+
+    pub async fn create_temporary_entry(&self) -> anyhow::Result<TempStoreEntry> {
+        loop {
+            let pet = petname::petname(3, "-");
+            let path = self.paths.temp.join(&pet);
+
+            match tokio::fs::create_dir(&path).await {
+                Ok(()) => return Ok(TempStoreEntry { name: pet, path }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => Err(e)?,
+            }
+        }
     }
 }
 

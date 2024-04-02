@@ -11,19 +11,15 @@ use thiserror::Error;
 use crate::build::linux::{
     fork,
     io::{ChannelError, EmptyFds, MessageChannel},
+    proc::ChildProcess,
     process::supervisor_process::{SupervisorError, SupervisorMapped},
-    user_ns::UserNamespaceConfig,
 };
-
-use super::ChildProcess;
 
 // The direction here is from the caller's/remote's perspective.
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum InitialRequest {
-    Spawn {
-        user_namespace_config: UserNamespaceConfig,
-    },
+    Spawn { config: super::SandboxConfig },
 }
 
 #[derive(Debug, Serialize, Deserialize, Error)]
@@ -40,9 +36,7 @@ pub fn zygote_process(peer: UnixStream) -> anyhow::Result<()> {
         };
 
         let response = match message {
-            InitialRequest::Spawn {
-                user_namespace_config,
-            } => match spawn(user_namespace_config, fds.pop_front()) {
+            InitialRequest::Spawn { config } => match spawn(config, fds.pop_front()) {
                 Ok(_) => Ok(()),
                 Err(error) => {
                     tracing::error!(?error, "failed to spawn the supervisor process");
@@ -57,10 +51,7 @@ pub fn zygote_process(peer: UnixStream) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn spawn(
-    user_namespace_config: UserNamespaceConfig,
-    mut sandbox_peer: Option<OwnedFd>,
-) -> anyhow::Result<()> {
+fn spawn(config: super::SandboxConfig, mut sandbox_peer: Option<OwnedFd>) -> anyhow::Result<()> {
     let sandbox_peer = sandbox_peer.take().ok_or_else(|| anyhow!("missing fd"))?;
     let (supervisor_peer, local_supervisor_peer) = UnixStream::pair()?;
 
@@ -79,7 +70,7 @@ fn spawn(
     )?
     .into();
 
-    if let Err(error) = user_namespace_config.write_mappings(pid.inner()) {
+    if let Err(error) = config.namespace.write_mappings(pid.inner()) {
         if let Err(error) = local_supervisor_peer.write_message(SupervisorMapped::Exit, EmptyFds) {
             tracing::warn!(?error, "failed to inform supervisor to exit");
         }

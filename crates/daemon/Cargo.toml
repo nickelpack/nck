@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 nck-io.workspace = true
 nck-hashing.workspace = true
-nck-spec.workspace = true
 
 anyhow.workspace = true
 tokio = {workspace = true, features = ["io-util", "time", "sync", "rt", "net", "macros", "fs", "rt-multi-thread"]}

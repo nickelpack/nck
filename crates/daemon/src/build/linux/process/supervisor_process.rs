@@ -1,8 +1,10 @@
 use std::os::{fd::OwnedFd, unix::net::UnixStream};
 
 use anyhow::Context;
+use nck_io::fs::clone_mount;
 use nix::{
     libc::{SIGCHLD, SIGHUP, SIGINT, SIGQUIT, SIGTERM},
+    mount::{MntFlags, MsFlags},
     sched::CloneFlags,
     sys::wait::{waitpid, WaitPidFlag},
     unistd::{Gid, Pid, Uid},
@@ -13,10 +15,10 @@ use thiserror::Error;
 
 use crate::build::linux::{
     fork,
+    fs::{mount, unmount, MountType, SYS_NONE},
     io::{EmptyFds, MessageChannel},
+    proc::{set_id, ChildProcess},
 };
-
-use super::{set_id, ChildProcess};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum SupervisorMapped {
@@ -66,8 +68,24 @@ fn fallible_supervisor_process(
 
     set_id(Uid::from_raw(0), Gid::from_raw(0), [])?;
 
+    mount(
+        SYS_NONE,
+        "/tmp",
+        Some(MountType::TmpFs),
+        MsFlags::MS_SHARED,
+        SYS_NONE,
+    )
+    .context("when mounting temporary fs")?;
+    let tmp = clone_mount(None, "/tmp").context("when cloning /tmp")?;
+    unmount("/tmp", MntFlags::MNT_DETACH).context("when unmounting /tmp")?;
+
     let cb = {
-        Box::new(move || super::sandbox_process::sandbox_process(sandbox_peer.try_clone().unwrap()))
+        Box::new(move || {
+            super::sandbox_process::sandbox_process(
+                sandbox_peer.try_clone().unwrap(),
+                tmp.try_clone().unwrap(),
+            )
+        })
     };
 
     let child = fork::clone(cb, CloneFlags::empty())?;

@@ -54,7 +54,6 @@ nickel-lang-core = "0.4.0"
 nck-io = { path = "./crates/io" }
 nck-hashing = { path = "./crates/hashing" }
 nck-archive = { path = "./crates/archive" }
-nck-spec = { path = "./crates/spec" }
 
 [profile.dev]
 opt-level = 0
